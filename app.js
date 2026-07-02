@@ -319,13 +319,17 @@ const Sync = {
     return !!this.getUserId();
   },
 
-  // Google 로그인
-  async signIn() {
-    if (!fbAuth) return null;
+  // Google 로그인 (signInWithPopup - 반드시 사용자 클릭 안에서 호출)
+  signIn() {
+    if (!fbAuth) return;
     const provider = new firebase.auth.GoogleAuthProvider();
-    // 리다이렉트 방식 (iOS Safari 호환)
-    await fbAuth.signInWithRedirect(provider);
-    return null;
+    fbAuth.signInWithPopup(provider)
+      .then(() => this.syncFromCloud())
+      .then(() => renderHome())
+      .catch(err => {
+        // 팝업 차단 시 안내
+        alert('팝업이 차단되었어요. Safari 설정 → 팝업 차단 해제 후 다시 시도해주세요.');
+      });
   },
 
   // 로그아웃
@@ -389,25 +393,30 @@ const Sync = {
     }
   },
 
-  // 두 카드 배열 병합 (ID 기준, updatedAt 최신 우선)
+  // 두 카드 배열 병합 (term 기준, 뜻 합집합, updatedAt 최신 우선)
   _mergeCards(localCards, cloudCards) {
     const map = new Map();
 
-    // 로컬 카드 먼저
-    localCards.forEach(c => {
+    function addCard(c) {
       c.updatedAt = c.updatedAt || 0;
-      map.set(c.id, c);
-    });
-
-    // 클라우드 카드 병합
-    cloudCards.forEach(c => {
-      c.updatedAt = c.updatedAt || 0;
-      const existing = map.get(c.id);
-      if (!existing || c.updatedAt > existing.updatedAt) {
-        map.set(c.id, c);
+      const key = c.term.toLowerCase().trim();
+      const existing = map.get(key);
+      if (existing) {
+        // 뜻 합집합
+        const eDefs = parseDefinitions(existing.definition);
+        const nDefs = parseDefinitions(c.definition);
+        nDefs.forEach(d => { if (!eDefs.includes(d)) eDefs.push(d); });
+        existing.definition = eDefs.join(', ');
+        if (c.favorite) existing.favorite = true;
+        existing.count = Math.max(existing.count || 1, c.count || 1);
+        if (c.updatedAt > existing.updatedAt) existing.updatedAt = c.updatedAt;
+      } else {
+        map.set(key, { ...c });
       }
-    });
+    }
 
+    localCards.forEach(addCard);
+    cloudCards.forEach(addCard);
     return Array.from(map.values());
   },
 
