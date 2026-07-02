@@ -319,19 +319,12 @@ const Sync = {
     return !!this.getUserId();
   },
 
-  // Google 로그인 (팝업 우선, 실패 시 리다이렉트)
+  // Google 로그인
   async signIn() {
     if (!fbAuth) return null;
     const provider = new firebase.auth.GoogleAuthProvider();
-    try {
-      await fbAuth.signInWithPopup(provider);
-      await this.syncFromCloud();
-      renderHome();
-    } catch (err) {
-      if (err.code === 'auth/popup-blocked' || err.code === 'auth/popup-closed-by-user') {
-        try { await fbAuth.signInWithRedirect(provider); } catch (e) {}
-      }
-    }
+    // 리다이렉트 방식 (iOS Safari 호환)
+    await fbAuth.signInWithRedirect(provider);
     return null;
   },
 
