@@ -319,14 +319,18 @@ const Sync = {
     return !!this.getUserId();
   },
 
-  // Google 로그인 (리다이렉트 방식 - iOS Safari 호환)
+  // Google 로그인 (팝업 우선, 실패 시 리다이렉트)
   async signIn() {
     if (!fbAuth) return null;
+    const provider = new firebase.auth.GoogleAuthProvider();
     try {
-      const provider = new firebase.auth.GoogleAuthProvider();
-      await fbAuth.signInWithRedirect(provider);
+      await fbAuth.signInWithPopup(provider);
+      await this.syncFromCloud();
+      renderHome();
     } catch (err) {
-      console.error('로그인 실패:', err);
+      if (err.code === 'auth/popup-blocked' || err.code === 'auth/popup-closed-by-user') {
+        try { await fbAuth.signInWithRedirect(provider); } catch (e) {}
+      }
     }
     return null;
   },
@@ -533,6 +537,7 @@ function renderHome() {
       <div class="sync-bar">
         ${signedIn
           ? `<span class="sync-status">${escapeHtml(userName)} · ${syncStatus}</span>
+             <button class="sync-btn" data-action="sync">동기화</button>
              <button class="sync-btn" data-action="signout">로그아웃</button>`
           : `<button class="sync-btn sync-btn-login" data-action="signin">Google 로그인으로 기기 동기화</button>`
         }
@@ -576,7 +581,12 @@ function renderHome() {
     else if (el.dataset.action === 'add') Router.go('/add');
     else if (el.dataset.action === 'study') Router.go('/study');
     else if (el.dataset.action === 'signin') {
-      Sync.signIn().then(() => renderHome());
+      Sync.signIn();
+    }
+    else if (el.dataset.action === 'sync') {
+      const btn = el;
+      btn.textContent = '동기화 중...';
+      Sync.syncFromCloud().then(() => renderHome());
     }
     else if (el.dataset.action === 'signout') {
       Sync.signOut().then(() => renderHome());
