@@ -811,7 +811,7 @@ function renderWords(letter) {
         <button class="btn-add-small" data-action="add">+ 추가</button>
         <button class="btn-hide-def" data-action="toggle-hide" id="btn-hide-def">뜻 숨기기</button>
       </div>
-      <p class="words-hint">두 번 터치: 별표 | ... 버튼: 수정/삭제 | 뜻 탭하면 보기</p>
+      <p class="words-hint">두 번 터치: 별표 | \u22EF 버튼: 수정/삭제</p>
       <div class="word-list">
         ${cards.length === 0
           ? '<p class="empty">이 알파벳에 단어가 없어요.</p>'
@@ -832,35 +832,9 @@ function renderWords(letter) {
     </div>
   `;
 
-  // 더블탭 → 별표, 꾹 누르기(500ms) → 수정 모달
+  // 더블탭 → 별표
   let lastTapId = null;
   let lastTapTime = 0;
-  let longPressTimer = null;
-  let didLongPress = false;
-
-  // named 함수로 정의해서 cleanup에서 제거 가능하게
-  function onTouchStart(e) {
-    if (e.target.closest('.btn-word-more')) return;
-    const item = e.target.closest('.word-item');
-    if (!item) return;
-    didLongPress = false;
-    longPressTimer = setTimeout(() => {
-      didLongPress = true;
-      if (navigator.vibrate) navigator.vibrate(30);
-      showEditModal(item.dataset.id, letter);
-    }, 500);
-  }
-  function onTouchEnd() {
-    clearTimeout(longPressTimer);
-    setTimeout(() => { didLongPress = false; }, 50);
-  }
-  function onTouchMove() {
-    clearTimeout(longPressTimer);
-  }
-
-  $app.addEventListener('touchstart', onTouchStart, { passive: true });
-  $app.addEventListener('touchend', onTouchEnd, { passive: true });
-  $app.addEventListener('touchmove', onTouchMove, { passive: true });
 
   const handler = (e) => {
     const el = e.target.closest('[data-action]');
@@ -919,10 +893,6 @@ function renderWords(letter) {
   setCleanup(() => {
     $app.removeEventListener('click', handler);
     $app.removeEventListener('click', onDefClick);
-    $app.removeEventListener('touchstart', onTouchStart);
-    $app.removeEventListener('touchend', onTouchEnd);
-    $app.removeEventListener('touchmove', onTouchMove);
-    clearTimeout(longPressTimer);
   });
 }
 
