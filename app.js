@@ -293,18 +293,16 @@ const Sync = {
     return !!this.getUserId();
   },
 
-  // Google 로그인
+  // Google 로그인 (리다이렉트 방식 - iOS Safari 호환)
   async signIn() {
     if (!fbAuth) return null;
     try {
       const provider = new firebase.auth.GoogleAuthProvider();
-      await fbAuth.signInWithPopup(provider);
-      await this.syncFromCloud();
-      return fbAuth.currentUser;
+      await fbAuth.signInWithRedirect(provider);
     } catch (err) {
       console.error('로그인 실패:', err);
-      return null;
     }
+    return null;
   },
 
   // 로그아웃
@@ -1145,7 +1143,7 @@ function showBulkInput() {
     <div class="bulk-actions">
       <div class="add-status" id="add-status"></div>
       <label class="btn-pdf" id="btn-pdf">
-        PDF
+        <span id="pdf-label-text">PDF</span>
         <input type="file" accept=".pdf" id="pdf-input" hidden />
       </label>
       <button class="btn-save" data-action="save" type="button">저장</button>
@@ -1165,11 +1163,11 @@ function showBulkInput() {
     const status = document.getElementById('add-status');
     const btnPdf = document.getElementById('btn-pdf');
     status.innerHTML = '<span class="status-ok">PDF 읽는 중...</span>';
-    btnPdf.textContent = '읽는 중...';
+    document.getElementById('pdf-label-text').textContent = '읽는 중...';
 
     try {
       const text = await extractPdfText(file);
-      btnPdf.textContent = 'PDF';
+      document.getElementById('pdf-label-text').textContent = 'PDF';
 
       if (!text.trim()) {
         status.innerHTML = '<span class="status-warn">PDF에서 텍스트를 찾을 수 없어요 (스캔/손글씨 PDF는 지원 안 됨)</span>';
@@ -1194,7 +1192,7 @@ function showBulkInput() {
         status.innerHTML = `<span class="status-warn">텍스트는 추출됐지만 단어-뜻 쌍을 인식하지 못했어요. 텍스트를 직접 확인/수정해주세요.</span>`;
       }
     } catch (err) {
-      btnPdf.textContent = 'PDF';
+      document.getElementById('pdf-label-text').textContent = 'PDF';
       status.innerHTML = '<span class="status-warn">PDF 읽기 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
     }
   });
@@ -1299,7 +1297,7 @@ function saveNewWords() {
 
 // ---- 학습 모드 (낱말카드) ----
 
-let didSwipe = false;
+let suppressClickUntil = 0; // 스와이프 후 click 억제용 타임스탬프
 
 const study = {
   letter: null,
@@ -1363,8 +1361,6 @@ function renderStudy(letter) {
 
 function renderStudyUI(slideDirection) {
   // 스와이프 플래그 강제 리셋
-  didSwipe = false;
-
   const card = study.cards[study.index];
   const progress = ((study.index + 1) / study.cards.length) * 100;
 
@@ -1454,7 +1450,7 @@ function renderStudyUI(slideDirection) {
   // 싱글탭 = 뒤집기 (click 기반 - swipe 후에도 안정적)
   flashcardTap.addEventListener('click', (e) => {
     if (e.target.closest('.btn-fav-card')) return;
-    if (didSwipe) { didSwipe = false; return; }
+    if (Date.now() < suppressClickUntil) return;
     if (isDoubleTap) { isDoubleTap = false; return; }
     flipCard();
   });
@@ -1478,20 +1474,28 @@ function renderStudyUI(slideDirection) {
   document.getElementById('btn-shuffle').addEventListener('click', toggleShuffle);
 
   // 알아요/몰라요 버튼
-  document.getElementById('btn-known').addEventListener('click', (e) => {
+  const btnKnown = document.getElementById('btn-known');
+  const btnUnknown = document.getElementById('btn-unknown');
+  function lockAnswerBtns() {
+    btnKnown.disabled = true;
+    btnUnknown.disabled = true;
+  }
+  btnKnown.addEventListener('click', () => {
     const id = study.cards[study.index].id;
     study.unknowns.delete(id);
     study.knowns.add(id);
     study.answered.add(id);
-    e.target.classList.add('btn-answer-pressed');
+    btnKnown.classList.add('btn-answer-pressed');
+    lockAnswerBtns();
     setTimeout(() => goNextOrFinish(), 200);
   });
-  document.getElementById('btn-unknown').addEventListener('click', (e) => {
+  btnUnknown.addEventListener('click', () => {
     const id = study.cards[study.index].id;
     study.knowns.delete(id);
     study.unknowns.add(id);
     study.answered.add(id);
-    e.target.classList.add('btn-answer-pressed');
+    btnUnknown.classList.add('btn-answer-pressed');
+    lockAnswerBtns();
     setTimeout(() => goNextOrFinish(), 200);
   });
 
@@ -1499,7 +1503,7 @@ function renderStudyUI(slideDirection) {
 }
 
 function flipCard() {
-  if (didSwipe) { didSwipe = false; return; }
+  if (Date.now() < suppressClickUntil) return;
   study.flipped = !study.flipped;
   const flashcard = document.getElementById('flashcard');
   if (flashcard) flashcard.classList.toggle('flipped', study.flipped);
@@ -1615,7 +1619,6 @@ function initSwipe(element) {
   element.addEventListener('touchstart', (e) => {
     startX = e.touches[0].clientX;
     startY = e.touches[0].clientY;
-    didSwipe = false;
   }, { passive: true });
 
   element.addEventListener('touchend', (e) => {
@@ -1623,11 +1626,9 @@ function initSwipe(element) {
     const dy = e.changedTouches[0].clientY - startY;
 
     if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
-      didSwipe = true;
+      suppressClickUntil = Date.now() + 350;
       if (dx < 0) nextCard();
       else prevCard();
-      // 새 카드 렌더링 후 플래그 리셋 (다음 터치가 막히지 않도록)
-      setTimeout(() => { didSwipe = false; }, 300);
     }
   }, { passive: true });
 }
@@ -2123,4 +2124,21 @@ if ('serviceWorker' in navigator) {
 }
 
 migrateAndSeed();
+
+// 리다이렉트 로그인 결과 처리 (Google 로그인 후 앱으로 돌아왔을 때)
+if (fbAuth) {
+  fbAuth.getRedirectResult().then(result => {
+    if (result && result.user) {
+      Sync.syncFromCloud().then(() => {
+        Router.handle(); // 화면 새로고침
+      });
+    }
+  }).catch(() => {});
+
+  // 로그인 상태 변화 감지
+  fbAuth.onAuthStateChanged(user => {
+    if (user) Sync.syncFromCloud();
+  });
+}
+
 Router.init();
