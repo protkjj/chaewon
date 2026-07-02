@@ -303,8 +303,9 @@ let fbDb = null;
 if (typeof firebase !== 'undefined') {
   firebase.initializeApp(firebaseConfig);
   fbAuth = firebase.auth();
+  // Safari ITP 대응: persistence를 LOCAL로 명시
+  fbAuth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(() => {});
   fbDb = firebase.firestore();
-  // 오프라인 지속성 활성화
   fbDb.enablePersistence().catch(() => {});
 }
 
@@ -319,16 +320,19 @@ const Sync = {
     return !!this.getUserId();
   },
 
-  // Google 로그인 (signInWithPopup - 반드시 사용자 클릭 안에서 호출)
+  // Google 로그인
   signIn() {
-    if (!fbAuth) return;
+    if (!fbAuth) { alert('Firebase가 로드되지 않았어요'); return; }
     const provider = new firebase.auth.GoogleAuthProvider();
     fbAuth.signInWithPopup(provider)
-      .then(() => this.syncFromCloud())
-      .then(() => renderHome())
+      .then(() => {
+        return this.syncFromCloud();
+      })
+      .then(() => {
+        renderHome();
+      })
       .catch(err => {
-        // 팝업 차단 시 안내
-        alert('팝업이 차단되었어요. Safari 설정 → 팝업 차단 해제 후 다시 시도해주세요.');
+        alert('로그인 오류: ' + err.code + '\n' + err.message);
       });
   },
 
@@ -2163,7 +2167,17 @@ if ('serviceWorker' in navigator) {
 }
 
 migrateAndSeed();
-Storage.dedup(); // 중복 단어 자동 제거
+Storage.dedup();
+
+// 강제 1회 정리: 중복 제거 후 Firebase 덮어쓰기
+if (!localStorage.getItem('cleanup_v1')) {
+  localStorage.setItem('cleanup_v1', 'true');
+  Storage.dedup();
+  // 로그인 되어있으면 정리된 데이터로 Firebase 덮어쓰기
+  if (Sync.isSignedIn()) {
+    Sync.syncToCloud();
+  }
+}
 
 // 리다이렉트 로그인 결과 처리 (Google 로그인 후 앱으로 돌아왔을 때)
 if (fbAuth) {
