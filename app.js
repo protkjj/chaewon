@@ -383,7 +383,9 @@ const Sync = {
       Storage._saveTrash(mergedTrash);
       localStorage.setItem('lastSyncAt', Date.now().toString());
 
-      // 병합 결과를 다시 클라우드에 업로드
+      // 병합 후 중복 제거
+      Storage.dedup();
+      // 정리된 결과를 다시 클라우드에 업로드
       await this.syncToCloud();
     } catch (err) {
       console.error('동기화 다운로드 실패:', err);
