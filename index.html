@@ -13,9 +13,18 @@
 <body>
   <div id="app"></div>
   <script>
-    // 이전 서비스 워커 캐시 정리 (1회만 실행)
-    if ('serviceWorker' in navigator && !localStorage.getItem('sw_cleaned_v2')) {
-      localStorage.setItem('sw_cleaned_v2', 'true');
+    // Firebase 리다이렉트 잔여 데이터 강제 정리
+    try {
+      Object.keys(sessionStorage).forEach(key => {
+        if (key.includes('firebase') || key.includes('pendingRedirect')) {
+          sessionStorage.removeItem(key);
+        }
+      });
+    } catch(e) {}
+
+    // 서비스 워커 캐시 정리
+    if ('serviceWorker' in navigator && !localStorage.getItem('sw_cleaned_v3')) {
+      localStorage.setItem('sw_cleaned_v3', 'true');
       navigator.serviceWorker.getRegistrations().then(regs => {
         regs.forEach(r => r.unregister());
       });

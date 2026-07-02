@@ -679,7 +679,7 @@ function renderHome() {
   $app.innerHTML = `
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
-      ${hasWords ? `<p class="home-sub">${cardCount}개 단어</p>` : ''}
+      ${hasWords ? `<p class="home-sub">${cardCount}개 단어 · v5</p>` : '<p class="home-sub">v5</p>'}
       <div class="sync-bar">
         ${signedIn
           ? `<span class="sync-status">${escapeHtml(userName)} · ${syncStatus}</span>
