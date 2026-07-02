@@ -921,6 +921,8 @@ function renderWords(letter) {
 
 // 단어 수정 모달
 function showEditModal(id, letter) {
+  // 이미 모달이 열려있으면 무시
+  if (document.querySelector('.modal-overlay')) return;
   const card = Storage.getAll().find(c => c.id === id);
   if (!card) return;
 
