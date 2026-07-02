@@ -330,44 +330,19 @@ const Sync = {
     return !!this.getUserId();
   },
 
-  // Google 로그인
+  // Google 로그인 (항상 팝업 방식 - redirect는 Safari ITP 때문에 불가)
   signIn() {
     if (!fbAuth) { alert('Firebase가 로드되지 않았어요'); return; }
     const provider = new firebase.auth.GoogleAuthProvider();
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
-      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-    const useRedirect = isIOS || window.matchMedia('(max-width: 700px)').matches;
-
-    const signInWithRedirect = () => {
-      return fbAuth.signInWithRedirect(provider).catch(err => {
-        alert('로그인 오류: ' + err.code + '\n' + err.message);
-      });
-    };
-
-    if (useRedirect) {
-      signInWithRedirect();
-      return;
-    }
-
     fbAuth.signInWithPopup(provider)
-      .then(() => {
-        return this.syncFromCloud();
-      })
-      .then(() => {
-        renderHome();
-      })
+      .then(() => this.syncFromCloud())
+      .then(() => renderHome())
       .catch(err => {
-        const popupFailed = [
-          'auth/popup-blocked',
-          'auth/popup-closed-by-user',
-          'auth/cancelled-popup-request',
-          'auth/operation-not-supported-in-this-environment',
-        ].includes(err.code);
-        if (popupFailed) {
-          signInWithRedirect();
-          return;
+        if (err.code === 'auth/popup-blocked') {
+          alert('팝업이 차단되었어요.\n\niPhone: 설정 → Safari → 팝업 차단 해제\nChrome: 팝업 허용 설정\n\n해제 후 다시 시도해주세요.');
+        } else if (err.code !== 'auth/popup-closed-by-user') {
+          alert('로그인 오류: ' + (err.message || err.code));
         }
-        alert('로그인 오류: ' + err.code + '\n' + err.message);
       });
   },
 
