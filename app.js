@@ -378,12 +378,26 @@ const Sync = {
   },
 
   // localStorage → Firestore 업로드 (개별 카드 updatedAt 기준 병합)
-  async syncToCloud() {
+  async syncToCloud(options = {}) {
+    const { mergeCloud = true } = options;
     const uid = this.getUserId();
     if (!uid || !fbDb) return;
 
     try {
-      const cleaned = this._reconcileData(Storage.getAll(), [], Storage.getTrash(), []);
+      let cloudCards = [];
+      let cloudTrash = [];
+
+      // 다른 기기에서 막 저장한 데이터가 있으면 업로드 전에 한 번 더 병합한다.
+      if (mergeCloud) {
+        const doc = await fbDb.collection('users').doc(uid).get();
+        if (doc.exists) {
+          const cloudData = doc.data();
+          cloudCards = this._safeParseCards(cloudData.cards);
+          cloudTrash = this._safeParseCards(cloudData.trash);
+        }
+      }
+
+      const cleaned = this._reconcileData(Storage.getAll(), cloudCards, Storage.getTrash(), cloudTrash);
       Storage._save(cleaned.cards);
       Storage._saveTrash(cleaned.trash);
 
@@ -408,7 +422,7 @@ const Sync = {
       const doc = await fbDb.collection('users').doc(uid).get();
       if (!doc.exists) {
         // 클라우드에 데이터 없음 → 현재 로컬 데이터 업로드
-        await this.syncToCloud();
+        await this.syncToCloud({ mergeCloud: false });
         return;
       }
 
@@ -426,7 +440,7 @@ const Sync = {
       localStorage.setItem('lastSyncAt', Date.now().toString());
 
       // 정리된 결과를 다시 클라우드에 업로드
-      await this.syncToCloud();
+      await this.syncToCloud({ mergeCloud: false });
     } catch (err) {
       console.error('동기화 다운로드 실패:', err);
     }
