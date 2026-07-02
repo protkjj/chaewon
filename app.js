@@ -249,6 +249,32 @@ const Storage = {
     return cards;
   },
 
+  // 중복 단어 제거 (같은 term이면 뜻 병합 후 하나만 유지)
+  dedup() {
+    const cards = this.getAll();
+    const map = new Map();
+    cards.forEach(c => {
+      const key = c.term.toLowerCase().trim();
+      const existing = map.get(key);
+      if (existing) {
+        // 뜻 병합
+        const eDefs = parseDefinitions(existing.definition);
+        const nDefs = parseDefinitions(c.definition);
+        nDefs.forEach(d => { if (!eDefs.includes(d)) eDefs.push(d); });
+        existing.definition = eDefs.join(', ');
+        existing.count = Math.max(existing.count || 1, c.count || 1);
+        if (c.favorite) existing.favorite = true;
+        if (c.updatedAt > (existing.updatedAt || 0)) existing.updatedAt = c.updatedAt;
+      } else {
+        map.set(key, { ...c });
+      }
+    });
+    const deduped = Array.from(map.values());
+    const removed = cards.length - deduped.length;
+    if (removed > 0) this._save(deduped);
+    return removed;
+  },
+
   _save(cards) {
     localStorage.setItem(this.KEY, JSON.stringify(cards));
   },
@@ -2124,6 +2150,7 @@ if ('serviceWorker' in navigator) {
 }
 
 migrateAndSeed();
+Storage.dedup(); // 중복 단어 자동 제거
 
 // 리다이렉트 로그인 결과 처리 (Google 로그인 후 앱으로 돌아왔을 때)
 if (fbAuth) {
