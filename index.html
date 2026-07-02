@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="단어장">
+  <title>단어장</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    // 이전 서비스 워커 캐시 정리 (1회만 실행)
+    if ('serviceWorker' in navigator && !localStorage.getItem('sw_cleaned')) {
+      localStorage.setItem('sw_cleaned', 'true');
+      navigator.serviceWorker.getRegistrations().then(regs => {
+        regs.forEach(r => r.unregister());
+      });
+      caches.keys().then(keys => {
+        keys.forEach(k => caches.delete(k));
+      });
+    }
+  </script>
+  <script src="pdf.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
