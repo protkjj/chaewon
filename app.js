@@ -2321,22 +2321,11 @@ if (!localStorage.getItem('cleanup_sync_v2')) {
   }
 }
 
-// 리다이렉트 로그인 결과 처리 (Google 로그인 후 앱으로 돌아왔을 때)
+// 로그인 상태 변화 감지 (팝업 로그인 후 또는 기존 세션 복원 시)
 if (fbAuth) {
-  fbAuth.getRedirectResult().then(result => {
-    if (result && result.user) {
-      Sync.syncFromCloud().then(() => {
-        Router.handle(); // 화면 새로고침
-      });
-    }
-  }).catch(() => {});
-
-  // 로그인 상태 변화 감지
   fbAuth.onAuthStateChanged(user => {
     if (user) {
       Sync.syncFromCloud().then(() => Router.handle());
-    } else {
-      Router.handle();
     }
   });
 }
