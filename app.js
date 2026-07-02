@@ -299,7 +299,7 @@ const Storage = {
 
 const firebaseConfig = {
   apiKey: "AIzaSyBmAkRDbNgE1VZ8Zj2vizklM4imMTbECKw",
-  authDomain: "protkjj.github.io",
+  authDomain: "chaewon-word.firebaseapp.com",
   projectId: "chaewon-word",
   storageBucket: "chaewon-word.firebasestorage.app",
   messagingSenderId: "574276438801",
@@ -679,7 +679,7 @@ function renderHome() {
   $app.innerHTML = `
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
-      ${hasWords ? `<p class="home-sub">${cardCount}개 단어 · v5</p>` : '<p class="home-sub">v5</p>'}
+      ${hasWords ? `<p class="home-sub">${cardCount}개 단어 · v6</p>` : '<p class="home-sub">v6</p>'}
       <div class="sync-bar">
         ${signedIn
           ? `<span class="sync-status">${escapeHtml(userName)} · ${syncStatus}</span>
