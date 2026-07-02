@@ -114,6 +114,23 @@ function parseBulkWords(text) {
     .filter(Boolean);
 }
 
+// 동기화/중복 제거 기준. 공백, 대소문자, 전각 문자를 최대한 같은 단어로 맞춘다.
+function normalizeTerm(text) {
+  return String(text || '')
+    .normalize('NFKC')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function mergeDefinitionText(a, b) {
+  const merged = parseDefinitions(a || '');
+  parseDefinitions(b || '').forEach(def => {
+    if (!merged.includes(def)) merged.push(def);
+  });
+  return merged.join(', ');
+}
+
 // ============================================================
 // 2. Storage - 단일 단어장 관리
 //
@@ -138,22 +155,15 @@ const Storage = {
 
     newCards.forEach(newCard => {
       // 소문자로 통일 저장
-      newCard.term = newCard.term.trim().toLowerCase();
+      newCard.term = normalizeTerm(newCard.term);
 
       const existing = cards.find(
-        c => c.term.toLowerCase() === newCard.term
+        c => normalizeTerm(c.term) === newCard.term
       );
 
       if (existing) {
         // 뜻 병합: 기존 뜻 + 새 뜻의 합집합
-        const existingDefs = parseDefinitions(existing.definition);
-        const newDefs = parseDefinitions(newCard.definition);
-        newDefs.forEach(nd => {
-          if (!existingDefs.includes(nd)) {
-            existingDefs.push(nd);
-          }
-        });
-        existing.definition = existingDefs.join(', ');
+        existing.definition = mergeDefinitionText(existing.definition, newCard.definition);
         existing.count = (existing.count || 1) + 1;
         mergedCount++;
       } else {
@@ -163,6 +173,7 @@ const Storage = {
           term: newCard.term,
           definition: newCard.definition,
           count: 1,
+          updatedAt: 0,
         });
       }
     });
@@ -198,6 +209,7 @@ const Storage = {
     if (card) {
       const trash = this.getTrash();
       card.deletedAt = Date.now();
+      card.updatedAt = card.deletedAt;
       trash.unshift(card);
       this._saveTrash(trash);
     }
@@ -244,6 +256,7 @@ const Storage = {
       definition: c.definition,
       count: 1,
       favorite: false,
+      updatedAt: 0,
     }));
     this._save(cards);
     return cards;
@@ -254,19 +267,16 @@ const Storage = {
     const cards = this.getAll();
     const map = new Map();
     cards.forEach(c => {
-      const key = c.term.toLowerCase().trim();
+      const key = normalizeTerm(c.term);
       const existing = map.get(key);
       if (existing) {
         // 뜻 병합
-        const eDefs = parseDefinitions(existing.definition);
-        const nDefs = parseDefinitions(c.definition);
-        nDefs.forEach(d => { if (!eDefs.includes(d)) eDefs.push(d); });
-        existing.definition = eDefs.join(', ');
+        existing.definition = mergeDefinitionText(existing.definition, c.definition);
         existing.count = Math.max(existing.count || 1, c.count || 1);
         if (c.favorite) existing.favorite = true;
         if (c.updatedAt > (existing.updatedAt || 0)) existing.updatedAt = c.updatedAt;
       } else {
-        map.set(key, { ...c });
+        map.set(key, { ...c, term: key, updatedAt: c.updatedAt || 0 });
       }
     });
     const deduped = Array.from(map.values());
@@ -324,6 +334,21 @@ const Sync = {
   signIn() {
     if (!fbAuth) { alert('Firebase가 로드되지 않았어요'); return; }
     const provider = new firebase.auth.GoogleAuthProvider();
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent)
+      || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const useRedirect = isIOS || window.matchMedia('(max-width: 700px)').matches;
+
+    const signInWithRedirect = () => {
+      return fbAuth.signInWithRedirect(provider).catch(err => {
+        alert('로그인 오류: ' + err.code + '\n' + err.message);
+      });
+    };
+
+    if (useRedirect) {
+      signInWithRedirect();
+      return;
+    }
+
     fbAuth.signInWithPopup(provider)
       .then(() => {
         return this.syncFromCloud();
@@ -332,6 +357,16 @@ const Sync = {
         renderHome();
       })
       .catch(err => {
+        const popupFailed = [
+          'auth/popup-blocked',
+          'auth/popup-closed-by-user',
+          'auth/cancelled-popup-request',
+          'auth/operation-not-supported-in-this-environment',
+        ].includes(err.code);
+        if (popupFailed) {
+          signInWithRedirect();
+          return;
+        }
         alert('로그인 오류: ' + err.code + '\n' + err.message);
       });
   },
@@ -348,11 +383,14 @@ const Sync = {
     if (!uid || !fbDb) return;
 
     try {
-      const cards = Storage.getAll();
-      const trash = Storage.getTrash();
+      const cleaned = this._reconcileData(Storage.getAll(), [], Storage.getTrash(), []);
+      Storage._save(cleaned.cards);
+      Storage._saveTrash(cleaned.trash);
+
       await fbDb.collection('users').doc(uid).set({
-        cards: JSON.stringify(cards),
-        trash: JSON.stringify(trash),
+        cards: JSON.stringify(cleaned.cards),
+        trash: JSON.stringify(cleaned.trash),
+        schemaVersion: 2,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
       localStorage.setItem('lastSyncAt', Date.now().toString());
@@ -375,21 +413,18 @@ const Sync = {
       }
 
       const cloudData = doc.data();
-      const cloudCards = JSON.parse(cloudData.cards || '[]');
-      const cloudTrash = JSON.parse(cloudData.trash || '[]');
+      const cloudCards = this._safeParseCards(cloudData.cards);
+      const cloudTrash = this._safeParseCards(cloudData.trash);
       const localCards = Storage.getAll();
       const localTrash = Storage.getTrash();
 
-      // 카드 병합: ID 기준, updatedAt이 더 최신인 쪽 우선
-      const merged = this._mergeCards(localCards, cloudCards);
-      const mergedTrash = this._mergeCards(localTrash, cloudTrash);
+      // active 단어와 휴지통을 한 번에 병합해야 삭제된 단어가 다시 살아나지 않는다.
+      const mergedData = this._reconcileData(localCards, cloudCards, localTrash, cloudTrash);
 
-      Storage._save(merged);
-      Storage._saveTrash(mergedTrash);
+      Storage._save(mergedData.cards);
+      Storage._saveTrash(mergedData.trash);
       localStorage.setItem('lastSyncAt', Date.now().toString());
 
-      // 병합 후 중복 제거
-      Storage.dedup();
       // 정리된 결과를 다시 클라우드에 업로드
       await this.syncToCloud();
     } catch (err) {
@@ -403,7 +438,7 @@ const Sync = {
 
     function addCard(c) {
       c.updatedAt = c.updatedAt || 0;
-      const key = c.term.toLowerCase().trim();
+      const key = normalizeTerm(c.term);
       const existing = map.get(key);
       if (existing) {
         // 뜻 합집합
@@ -424,6 +459,86 @@ const Sync = {
     return Array.from(map.values());
   },
 
+  _safeParseCards(value) {
+    if (Array.isArray(value)) return value;
+    if (!value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  },
+
+  _reconcileData(localCards, cloudCards, localTrash, cloudTrash) {
+    const records = new Map();
+
+    const add = (card, source) => {
+      if (!card || !card.term) return;
+      const key = normalizeTerm(card.term);
+      if (!key) return;
+
+      const updatedAt = Number(card.updatedAt || 0);
+      const deletedAt = Number(card.deletedAt || 0);
+      const isTrash = source === 'trash' || deletedAt > 0;
+      const existing = records.get(key) || {
+        id: card.id || generateId(),
+        term: key,
+        definition: '',
+        count: 1,
+        favorite: false,
+        activeUpdatedAt: 0,
+        deletedAt: 0,
+        updatedAt: 0,
+      };
+
+      existing.definition = mergeDefinitionText(existing.definition, card.definition || '');
+      existing.count = Math.max(existing.count || 1, card.count || 1);
+      existing.favorite = !!existing.favorite || !!card.favorite;
+      existing.updatedAt = Math.max(existing.updatedAt || 0, updatedAt);
+
+      if (isTrash) {
+        existing.deletedAt = Math.max(existing.deletedAt || 0, deletedAt || updatedAt || 0);
+        existing.trashId = existing.trashId || card.id;
+      } else {
+        existing.activeUpdatedAt = Math.max(existing.activeUpdatedAt || 0, updatedAt || 0);
+        existing.activeId = existing.activeId || card.id;
+      }
+
+      records.set(key, existing);
+    };
+
+    localCards.forEach(card => add(card, 'active'));
+    cloudCards.forEach(card => add(card, 'active'));
+    localTrash.forEach(card => add(card, 'trash'));
+    cloudTrash.forEach(card => add(card, 'trash'));
+
+    const cards = [];
+    const trash = [];
+
+    records.forEach(record => {
+      const latest = Math.max(record.updatedAt || 0, record.activeUpdatedAt || 0, record.deletedAt || 0);
+      const base = {
+        id: record.activeId || record.trashId || record.id || generateId(),
+        term: record.term,
+        definition: record.definition,
+        count: record.count || 1,
+        favorite: !!record.favorite,
+        updatedAt: latest,
+      };
+
+      if (record.deletedAt > record.activeUpdatedAt) {
+        trash.push({ ...base, id: record.trashId || base.id, deletedAt: record.deletedAt });
+      } else {
+        cards.push(base);
+      }
+    });
+
+    cards.sort((a, b) => a.term.localeCompare(b.term));
+    trash.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+    return { cards, trash };
+  },
+
   // 동기화 상태 텍스트
   getStatusText() {
     if (!fbAuth) return '';
@@ -440,10 +555,17 @@ const Sync = {
 // Storage 함수에 updatedAt 자동 추가 + 변경 시 자동 동기화
 const originalAddCards = Storage.addCards.bind(Storage);
 Storage.addCards = function(newCards) {
+  const now = Date.now();
+  const touchedTerms = new Set(newCards.map(c => normalizeTerm(c.term)));
   const result = originalAddCards(newCards);
-  // 각 카드에 updatedAt 추가
+
+  // 이번에 실제로 추가/병합된 단어만 최신으로 찍는다.
+  // 모든 기존 카드에 now를 찍으면 다른 기기에서 삭제한 단어가 되살아날 수 있다.
   const cards = this.getAll();
-  cards.forEach(c => { if (!c.updatedAt) c.updatedAt = Date.now(); });
+  cards.forEach(c => {
+    if (touchedTerms.has(normalizeTerm(c.term))) c.updatedAt = now;
+    else if (c.updatedAt === undefined) c.updatedAt = 0;
+  });
   this._save(cards);
   // 비동기 동기화 (UI 블로킹 없이)
   if (Sync.isSignedIn()) Sync.syncToCloud();
@@ -452,6 +574,7 @@ Storage.addCards = function(newCards) {
 
 const originalUpdateCard = Storage.updateCard.bind(Storage);
 Storage.updateCard = function(id, data) {
+  if (data.term !== undefined) data.term = normalizeTerm(data.term);
   data.updatedAt = Date.now();
   const result = originalUpdateCard(id, data);
   if (Sync.isSignedIn()) Sync.syncToCloud();
@@ -473,6 +596,34 @@ Storage.toggleFavorite = function(id) {
 const originalDeleteCard = Storage.deleteCard.bind(Storage);
 Storage.deleteCard = function(id) {
   const result = originalDeleteCard(id);
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+const originalRestoreCard = Storage.restoreCard.bind(Storage);
+Storage.restoreCard = function(id) {
+  const result = originalRestoreCard(id);
+  const cards = this.getAll();
+  const card = cards.find(c => c.id === id);
+  if (card) {
+    card.term = normalizeTerm(card.term);
+    card.updatedAt = Date.now();
+    this._save(cards);
+  }
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+const originalPermanentDelete = Storage.permanentDelete.bind(Storage);
+Storage.permanentDelete = function(id) {
+  const result = originalPermanentDelete(id);
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+const originalEmptyTrash = Storage.emptyTrash.bind(Storage);
+Storage.emptyTrash = function() {
+  const result = originalEmptyTrash();
   if (Sync.isSignedIn()) Sync.syncToCloud();
   return result;
 };
@@ -2169,10 +2320,12 @@ if ('serviceWorker' in navigator) {
 migrateAndSeed();
 Storage.dedup();
 
-// 강제 1회 정리: 중복 제거 후 Firebase 덮어쓰기
-if (!localStorage.getItem('cleanup_v1')) {
-  localStorage.setItem('cleanup_v1', 'true');
-  Storage.dedup();
+// 강제 1회 정리: active/trash를 함께 정리해서 중복 폭증과 삭제 부활을 막는다.
+if (!localStorage.getItem('cleanup_sync_v2')) {
+  localStorage.setItem('cleanup_sync_v2', 'true');
+  const cleaned = Sync._reconcileData(Storage.getAll(), [], Storage.getTrash(), []);
+  Storage._save(cleaned.cards);
+  Storage._saveTrash(cleaned.trash);
   // 로그인 되어있으면 정리된 데이터로 Firebase 덮어쓰기
   if (Sync.isSignedIn()) {
     Sync.syncToCloud();
@@ -2191,7 +2344,11 @@ if (fbAuth) {
 
   // 로그인 상태 변화 감지
   fbAuth.onAuthStateChanged(user => {
-    if (user) Sync.syncFromCloud();
+    if (user) {
+      Sync.syncFromCloud().then(() => Router.handle());
+    } else {
+      Router.handle();
+    }
   });
 }
 

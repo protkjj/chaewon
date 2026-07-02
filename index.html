@@ -14,8 +14,8 @@
   <div id="app"></div>
   <script>
     // 이전 서비스 워커 캐시 정리 (1회만 실행)
-    if ('serviceWorker' in navigator && !localStorage.getItem('sw_cleaned')) {
-      localStorage.setItem('sw_cleaned', 'true');
+    if ('serviceWorker' in navigator && !localStorage.getItem('sw_cleaned_v2')) {
+      localStorage.setItem('sw_cleaned_v2', 'true');
       navigator.serviceWorker.getRegistrations().then(regs => {
         regs.forEach(r => r.unregister());
       });
@@ -28,6 +28,6 @@
   <script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.0/firebase-firestore-compat.js"></script>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

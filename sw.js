@@ -7,13 +7,13 @@
 //
 // 이렇게 하면 코드를 수정해도 새로고침만 하면 바로 반영됨
 
-const CACHE_NAME = 'flashcard-v3';
+const CACHE_NAME = 'flashcard-v4';
 
 // install: 기본 파일들을 미리 캐시 (오프라인 첫 접속 대비)
 self.addEventListener('install', (e) => {
   e.waitUntil(
     caches.open(CACHE_NAME).then(cache =>
-      cache.addAll(['./', './index.html', './style.css', './app.js'])
+      cache.addAll(['./', './index.html', './style.css', './app.js?v=4'])
     )
   );
   self.skipWaiting();
