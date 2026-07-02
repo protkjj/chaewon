@@ -838,30 +838,29 @@ function renderWords(letter) {
   let longPressTimer = null;
   let didLongPress = false;
 
-  // 꾹 누르기 감지 (터치)
-  $app.addEventListener('touchstart', (e) => {
-    // ... 버튼은 클릭으로 처리하므로 long press 제외
+  // named 함수로 정의해서 cleanup에서 제거 가능하게
+  function onTouchStart(e) {
     if (e.target.closest('.btn-word-more')) return;
     const item = e.target.closest('.word-item');
     if (!item) return;
     didLongPress = false;
     longPressTimer = setTimeout(() => {
       didLongPress = true;
-      // 햅틱 피드백 (지원되는 기기)
       if (navigator.vibrate) navigator.vibrate(30);
       showEditModal(item.dataset.id, letter);
     }, 500);
-  }, { passive: true });
-
-  $app.addEventListener('touchend', () => {
+  }
+  function onTouchEnd() {
     clearTimeout(longPressTimer);
-    // 꾹 누르기 플래그를 즉시 리셋 (다음 탭이 무시되지 않도록)
     setTimeout(() => { didLongPress = false; }, 50);
-  }, { passive: true });
-
-  $app.addEventListener('touchmove', () => {
+  }
+  function onTouchMove() {
     clearTimeout(longPressTimer);
-  }, { passive: true });
+  }
+
+  $app.addEventListener('touchstart', onTouchStart, { passive: true });
+  $app.addEventListener('touchend', onTouchEnd, { passive: true });
+  $app.addEventListener('touchmove', onTouchMove, { passive: true });
 
   const handler = (e) => {
     const el = e.target.closest('[data-action]');
@@ -908,15 +907,23 @@ function renderWords(letter) {
   };
 
   // 숨긴 뜻 개별 탭 → 잠깐 보이기
-  $app.addEventListener('click', (e) => {
+  function onDefClick(e) {
     const def = e.target.closest('.word-definition');
     if (def && def.closest('.hide-defs')) {
       def.classList.toggle('def-revealed');
     }
-  });
+  }
 
+  $app.addEventListener('click', onDefClick);
   $app.addEventListener('click', handler);
-  setCleanup(() => $app.removeEventListener('click', handler));
+  setCleanup(() => {
+    $app.removeEventListener('click', handler);
+    $app.removeEventListener('click', onDefClick);
+    $app.removeEventListener('touchstart', onTouchStart);
+    $app.removeEventListener('touchend', onTouchEnd);
+    $app.removeEventListener('touchmove', onTouchMove);
+    clearTimeout(longPressTimer);
+  });
 }
 
 // 단어 수정 모달
