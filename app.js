@@ -1168,9 +1168,8 @@ function showBulkInput() {
     </div>
     <div class="bulk-actions">
       <div class="add-status" id="add-status"></div>
-      <label class="btn-pdf" id="btn-pdf">
-        <span id="pdf-label-text">PDF</span>
-        <input type="file" accept=".pdf" id="pdf-input" hidden />
+      <label class="btn-pdf btn-pdf-disabled" id="btn-pdf" title="추후 개발 예정">
+        <span id="pdf-label-text">PDF (준비 중)</span>
       </label>
       <button class="btn-save" data-action="save" type="button">저장</button>
     </div>

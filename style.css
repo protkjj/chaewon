@@ -906,6 +906,11 @@ mark {
   color: var(--primary);
 }
 
+.btn-pdf-disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
 .bulk-actions {
   display: flex;
   align-items: center;
