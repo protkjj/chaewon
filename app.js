@@ -299,7 +299,7 @@ const Storage = {
 
 const firebaseConfig = {
   apiKey: "AIzaSyBmAkRDbNgE1VZ8Zj2vizklM4imMTbECKw",
-  authDomain: "chaewon-word.firebaseapp.com",
+  authDomain: "protkjj.github.io",
   projectId: "chaewon-word",
   storageBucket: "chaewon-word.firebasestorage.app",
   messagingSenderId: "574276438801",

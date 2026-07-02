@@ -31,18 +31,17 @@ self.addEventListener('activate', (e) => {
   self.clients.claim();
 });
 
-// fetch: 네트워크 우선, 실패 시 캐시
+// fetch: 네트워크 우선, 실패 시 캐시 (GET만 캐시)
 self.addEventListener('fetch', (e) => {
+  if (e.request.method !== 'GET') return;
   e.respondWith(
     fetch(e.request)
       .then(response => {
-        // 성공하면 캐시에도 저장
         const clone = response.clone();
         caches.open(CACHE_NAME).then(cache => cache.put(e.request, clone));
         return response;
       })
       .catch(() => {
-        // 오프라인이면 캐시에서
         return caches.match(e.request);
       })
   );
