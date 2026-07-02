@@ -255,6 +255,193 @@ const Storage = {
 };
 
 // ============================================================
+// 2-1. Firebase 동기화
+//
+// Google 로그인 → Firestore에 단어 데이터 저장/동기화
+// 오프라인에서는 localStorage만 사용, 온라인 시 자동 동기화
+// ============================================================
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBmAkRDbNgE1VZ8Zj2vizklM4imMTbECKw",
+  authDomain: "chaewon-word.firebaseapp.com",
+  projectId: "chaewon-word",
+  storageBucket: "chaewon-word.firebasestorage.app",
+  messagingSenderId: "574276438801",
+  appId: "1:574276438801:web:0caf9da02a48caf1219ab0",
+};
+
+// Firebase 초기화 (SDK가 로드된 경우에만)
+let fbAuth = null;
+let fbDb = null;
+
+if (typeof firebase !== 'undefined') {
+  firebase.initializeApp(firebaseConfig);
+  fbAuth = firebase.auth();
+  fbDb = firebase.firestore();
+  // 오프라인 지속성 활성화
+  fbDb.enablePersistence().catch(() => {});
+}
+
+const Sync = {
+  // 현재 로그인된 사용자 ID
+  getUserId() {
+    return fbAuth && fbAuth.currentUser ? fbAuth.currentUser.uid : null;
+  },
+
+  // 로그인 상태
+  isSignedIn() {
+    return !!this.getUserId();
+  },
+
+  // Google 로그인
+  async signIn() {
+    if (!fbAuth) return null;
+    try {
+      const provider = new firebase.auth.GoogleAuthProvider();
+      await fbAuth.signInWithPopup(provider);
+      await this.syncFromCloud();
+      return fbAuth.currentUser;
+    } catch (err) {
+      console.error('로그인 실패:', err);
+      return null;
+    }
+  },
+
+  // 로그아웃
+  async signOut() {
+    if (!fbAuth) return;
+    await fbAuth.signOut();
+  },
+
+  // localStorage → Firestore 업로드 (개별 카드 updatedAt 기준 병합)
+  async syncToCloud() {
+    const uid = this.getUserId();
+    if (!uid || !fbDb) return;
+
+    try {
+      const cards = Storage.getAll();
+      const trash = Storage.getTrash();
+      await fbDb.collection('users').doc(uid).set({
+        cards: JSON.stringify(cards),
+        trash: JSON.stringify(trash),
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+      localStorage.setItem('lastSyncAt', Date.now().toString());
+    } catch (err) {
+      console.error('동기화 업로드 실패:', err);
+    }
+  },
+
+  // Firestore → localStorage 다운로드 + 병합
+  async syncFromCloud() {
+    const uid = this.getUserId();
+    if (!uid || !fbDb) return;
+
+    try {
+      const doc = await fbDb.collection('users').doc(uid).get();
+      if (!doc.exists) {
+        // 클라우드에 데이터 없음 → 현재 로컬 데이터 업로드
+        await this.syncToCloud();
+        return;
+      }
+
+      const cloudData = doc.data();
+      const cloudCards = JSON.parse(cloudData.cards || '[]');
+      const cloudTrash = JSON.parse(cloudData.trash || '[]');
+      const localCards = Storage.getAll();
+      const localTrash = Storage.getTrash();
+
+      // 카드 병합: ID 기준, updatedAt이 더 최신인 쪽 우선
+      const merged = this._mergeCards(localCards, cloudCards);
+      const mergedTrash = this._mergeCards(localTrash, cloudTrash);
+
+      Storage._save(merged);
+      Storage._saveTrash(mergedTrash);
+      localStorage.setItem('lastSyncAt', Date.now().toString());
+
+      // 병합 결과를 다시 클라우드에 업로드
+      await this.syncToCloud();
+    } catch (err) {
+      console.error('동기화 다운로드 실패:', err);
+    }
+  },
+
+  // 두 카드 배열 병합 (ID 기준, updatedAt 최신 우선)
+  _mergeCards(localCards, cloudCards) {
+    const map = new Map();
+
+    // 로컬 카드 먼저
+    localCards.forEach(c => {
+      c.updatedAt = c.updatedAt || 0;
+      map.set(c.id, c);
+    });
+
+    // 클라우드 카드 병합
+    cloudCards.forEach(c => {
+      c.updatedAt = c.updatedAt || 0;
+      const existing = map.get(c.id);
+      if (!existing || c.updatedAt > existing.updatedAt) {
+        map.set(c.id, c);
+      }
+    });
+
+    return Array.from(map.values());
+  },
+
+  // 동기화 상태 텍스트
+  getStatusText() {
+    if (!fbAuth) return '';
+    if (!this.isSignedIn()) return '로그인하면 기기 간 동기화';
+    const lastSync = localStorage.getItem('lastSyncAt');
+    if (lastSync) {
+      const ago = Math.round((Date.now() - parseInt(lastSync)) / 60000);
+      return ago < 1 ? '방금 동기화됨' : `${ago}분 전 동기화`;
+    }
+    return '동기화 대기 중';
+  },
+};
+
+// Storage 함수에 updatedAt 자동 추가 + 변경 시 자동 동기화
+const originalAddCards = Storage.addCards.bind(Storage);
+Storage.addCards = function(newCards) {
+  const result = originalAddCards(newCards);
+  // 각 카드에 updatedAt 추가
+  const cards = this.getAll();
+  cards.forEach(c => { if (!c.updatedAt) c.updatedAt = Date.now(); });
+  this._save(cards);
+  // 비동기 동기화 (UI 블로킹 없이)
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+const originalUpdateCard = Storage.updateCard.bind(Storage);
+Storage.updateCard = function(id, data) {
+  data.updatedAt = Date.now();
+  const result = originalUpdateCard(id, data);
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+const originalToggleFav = Storage.toggleFavorite.bind(Storage);
+Storage.toggleFavorite = function(id) {
+  const result = originalToggleFav(id);
+  if (result) {
+    const cards = this.getAll();
+    const card = cards.find(c => c.id === id);
+    if (card) { card.updatedAt = Date.now(); this._save(cards); }
+  }
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+const originalDeleteCard = Storage.deleteCard.bind(Storage);
+Storage.deleteCard = function(id) {
+  const result = originalDeleteCard(id);
+  if (Sync.isSignedIn()) Sync.syncToCloud();
+  return result;
+};
+
+// ============================================================
 // 3. Router - 해시(#) 기반 페이지 전환
 //
 // #/            → 홈 (랜딩)
@@ -309,10 +496,21 @@ function renderHome() {
   const cardCount = Storage.getAll().length;
   const hasWords = cardCount > 0;
 
+  const syncStatus = Sync.getStatusText();
+  const signedIn = Sync.isSignedIn();
+  const userName = fbAuth && fbAuth.currentUser ? fbAuth.currentUser.displayName : '';
+
   $app.innerHTML = `
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
       ${hasWords ? `<p class="home-sub">${cardCount}개 단어</p>` : ''}
+      <div class="sync-bar">
+        ${signedIn
+          ? `<span class="sync-status">${escapeHtml(userName)} · ${syncStatus}</span>
+             <button class="sync-btn" data-action="signout">로그아웃</button>`
+          : `<button class="sync-btn sync-btn-login" data-action="signin">Google 로그인으로 기기 동기화</button>`
+        }
+      </div>
     </header>
     <div class="home-cards">
       ${hasWords ? `
@@ -351,6 +549,12 @@ function renderHome() {
     if (el.dataset.action === 'words') Router.go('/alphabet');
     else if (el.dataset.action === 'add') Router.go('/add');
     else if (el.dataset.action === 'study') Router.go('/study');
+    else if (el.dataset.action === 'signin') {
+      Sync.signIn().then(() => renderHome());
+    }
+    else if (el.dataset.action === 'signout') {
+      Sync.signOut().then(() => renderHome());
+    }
   };
 
   $app.addEventListener('click', handler);
