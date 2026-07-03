@@ -1350,15 +1350,10 @@ function showPdfInput() {
       인식 후 결과를 확인/수정한 뒤 저장하세요.
     </div>
     <div class="pdf-upload-area">
-      <label class="btn-pdf-large">
-        <input type="file" id="pdf-input" accept=".pdf" hidden />
-        <span class="pdf-btn-icon">\u{1F4C4}</span>
-        <span id="pdf-label-text">PDF 업로드</span>
-      </label>
-      <label class="btn-pdf-large">
-        <input type="file" id="camera-input" accept="image/*" hidden />
-        <span class="pdf-btn-icon">\u{1F4F7}</span>
-        <span id="camera-label-text">사진</span>
+      <label class="btn-pdf-large btn-upload-single">
+        <input type="file" id="file-input" accept=".pdf,image/*" hidden />
+        <span class="pdf-btn-icon">\u{1F4CE}</span>
+        <span id="file-label-text">PDF 또는 사진 선택</span>
       </label>
     </div>
     <div class="add-status" id="add-status"></div>
@@ -1393,38 +1388,32 @@ function showPdfInput() {
       : '<span class="status-warn">텍스트는 추출됐지만 단어-뜻 쌍을 인식하지 못했어요. 직접 수정해주세요.</span>';
   }
 
-  // PDF 업로드
-  document.getElementById('pdf-input').addEventListener('change', async (e) => {
+  // 파일 업로드 (PDF/사진 자동 감지)
+  document.getElementById('file-input').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    document.getElementById('add-status').innerHTML = '<span class="status-ok">PDF 읽는 중...</span>';
-    document.getElementById('pdf-label-text').textContent = '읽는 중...';
-    try {
-      const text = await extractPdfText(file, 'eng+kor');
-      document.getElementById('pdf-label-text').textContent = 'PDF 업로드';
-      handleOcrResult(text, 'PDF');
-    } catch (err) {
-      document.getElementById('pdf-label-text').textContent = 'PDF 업로드';
-      document.getElementById('add-status').innerHTML =
-        '<span class="status-warn">PDF 읽기 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
-    }
-  });
 
-  // 사진 OCR
-  document.getElementById('camera-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    document.getElementById('add-status').innerHTML = '<span class="status-ok">사진 인식 중... (처음엔 느릴 수 있어요)</span>';
-    document.getElementById('camera-label-text').textContent = '인식 중...';
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    const label = document.getElementById('file-label-text');
+    const status = document.getElementById('add-status');
+
+    label.textContent = '인식 중...';
+    status.innerHTML = isPdf
+      ? '<span class="status-ok">PDF 읽는 중...</span>'
+      : '<span class="status-ok">사진 인식 중... (처음엔 느릴 수 있어요)</span>';
+
     try {
-      const text = await ocrImage(file, 'eng+kor');
-      document.getElementById('camera-label-text').textContent = '사진';
-      handleOcrResult(text, '사진');
+      const text = isPdf
+        ? await extractPdfText(file, 'eng+kor')
+        : await ocrImage(file, 'eng+kor');
+      label.textContent = 'PDF 또는 사진 선택';
+      handleOcrResult(text, isPdf ? 'PDF' : '사진');
     } catch (err) {
-      document.getElementById('camera-label-text').textContent = '사진';
-      document.getElementById('add-status').innerHTML =
-        '<span class="status-warn">사진 인식 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
+      label.textContent = 'PDF 또는 사진 선택';
+      status.innerHTML = '<span class="status-warn">인식 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
     }
+    // 같은 파일 다시 선택할 수 있도록 초기화
+    e.target.value = '';
   });
 }
 
