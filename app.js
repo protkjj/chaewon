@@ -89,6 +89,9 @@ function parseBulkWords(text) {
     .map(line => line.trim())
     .filter(line => line.length > 0)
     .map(line => {
+      // 줄 앞의 번호 제거: "1. apple — 사과" → "apple — 사과"
+      line = line.replace(/^\d+[\.\)]\s*/, '');
+
       // 1) em dash 구분자: "apple — 사과"
       let idx = line.indexOf(' — ');
       if (idx > 0) {
@@ -99,7 +102,15 @@ function parseBulkWords(text) {
       if (idx > 0) {
         return { term: line.slice(0, idx).trim(), definition: line.slice(idx + 3).trim() };
       }
-      // 3) 공백 없는 hyphen/dash에서 영어→한글 전환: "apple-사과"
+      // 3) 콜론 구분자: "apple : 사과" 또는 "apple: 사과"
+      idx = line.indexOf(':');
+      if (idx > 0) {
+        const def = line.slice(idx + 1).trim();
+        if (def) {
+          return { term: line.slice(0, idx).trim(), definition: def };
+        }
+      }
+      // 4) 공백 없는 hyphen/dash에서 영어→한글 전환: "apple-사과"
       const dashMatch = line.match(/^(.+?)[-—]([\uAC00-\uD7AF\u3131-\u318E~(].*)$/);
       if (dashMatch) {
         return { term: dashMatch[1].trim(), definition: dashMatch[2].trim() };
