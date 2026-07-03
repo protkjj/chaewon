@@ -1415,8 +1415,8 @@ function showPdfInput() {
 
     try {
       const text = isPdf
-        ? await extractPdfText(file, 'eng+kor')
-        : await ocrImage(file, 'eng+kor');
+        ? await extractPdfText(file, 'en')
+        : await ocrImage(file, 'en');
       label.textContent = 'PDF 또는 사진 선택';
       handleOcrResult(text, isPdf ? 'PDF' : '사진');
     } catch (err) {
@@ -1442,21 +1442,53 @@ async function loadPdfJs() {
   });
 }
 
-// tesseract.js 동적 로드 (버튼 눌렀을 때만 CDN에서 다운로드, ~2MB)
-async function loadTesseract() {
-  if (typeof Tesseract !== 'undefined') return;
+// 파일 → Base64 변환
+function fileToBase64(file) {
   return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
-    script.onload = resolve;
-    script.onerror = () => reject(new Error('OCR 라이브러리 로드 실패'));
-    document.head.appendChild(script);
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
   });
+}
+
+// Gemini API로 이미지에서 단어-뜻 쌍 추출
+// tesseract.js와 달리 AI가 직접 "단어 — 뜻" 형식으로 정리해줌
+const GEMINI_API_KEY = 'AQ.Ab8RN6KdQqwn-0cA5KfCMCUFbMZR3LVG5npmRUzuCTRErwr_JA';
+
+async function callGeminiOcr(base64Data, mimeType, lang) {
+  const prompt = lang === 'jp'
+    ? '이 이미지에서 일본어 단어와 한국어 뜻을 추출해서 "일본어 — 한국어뜻" 형식으로 한 줄에 하나씩 출력해주세요. 다른 설명 없이 단어-뜻 쌍만 출력하세요.'
+    : '이 이미지에서 영어 단어와 한국어 뜻을 추출해서 "영어단어 — 한국어뜻" 형식으로 한 줄에 하나씩 출력해주세요. 다른 설명 없이 단어-뜻 쌍만 출력하세요.';
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: prompt },
+            { inlineData: { mimeType, data: base64Data } }
+          ]
+        }]
+      })
+    }
+  );
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gemini API 오류 (${response.status})`);
+  }
+
+  const result = await response.json();
+  return result.candidates?.[0]?.content?.parts?.[0]?.text || '';
 }
 
 // PDF에서 텍스트 추출
 // 1단계: 텍스트 레이어가 있으면 직접 추출 (빠름)
-// 2단계: 텍스트 레이어가 없으면 (Goodnotes 등 이미지 PDF) OCR로 폴백
+// 2단계: 텍스트 레이어가 없으면 (Goodnotes 등 이미지 PDF) Gemini AI로 인식
 async function extractPdfText(file, lang) {
   await loadPdfJs();
   pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -1486,11 +1518,10 @@ async function extractPdfText(file, lang) {
       });
       if (line.trim()) fullText += line.trim() + '\n';
     } else {
-      // 텍스트 레이어 없음 (이미지 PDF) → OCR 폴백
+      // 텍스트 레이어 없음 (이미지 PDF) → Gemini AI 인식
       const status = document.getElementById('add-status');
-      if (status) status.innerHTML = `<span class="status-ok">페이지 ${i}/${pdf.numPages} OCR 인식 중...</span>`;
+      if (status) status.innerHTML = `<span class="status-ok">페이지 ${i}/${pdf.numPages} AI 인식 중...</span>`;
 
-      await loadTesseract();
       const viewport = page.getViewport({ scale: 2.0 });
       const canvas = document.createElement('canvas');
       canvas.width = viewport.width;
@@ -1498,7 +1529,8 @@ async function extractPdfText(file, lang) {
       const ctx = canvas.getContext('2d');
       await page.render({ canvasContext: ctx, viewport }).promise;
 
-      const { data: { text } } = await Tesseract.recognize(canvas, lang);
+      const base64 = canvas.toDataURL('image/png').split(',')[1];
+      const text = await callGeminiOcr(base64, 'image/png', lang);
       fullText += text + '\n';
     }
   }
@@ -1506,11 +1538,10 @@ async function extractPdfText(file, lang) {
   return fullText.trim();
 }
 
-// 이미지 파일 → OCR 텍스트 추출
+// 이미지 파일 → Gemini AI 인식
 async function ocrImage(file, lang) {
-  await loadTesseract();
-  const { data: { text } } = await Tesseract.recognize(file, lang);
-  return text.trim();
+  const base64 = await fileToBase64(file);
+  return callGeminiOcr(base64, file.type || 'image/jpeg', lang);
 }
 
 function updateAddStatus() {
