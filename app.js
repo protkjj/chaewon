@@ -1185,6 +1185,7 @@ function renderAdd() {
       <div class="add-tabs">
         <button class="add-tab add-tab-active" data-action="tab-single">하나씩</button>
         <button class="add-tab" data-action="tab-bulk">대량 입력</button>
+        <button class="add-tab" data-action="tab-pdf">PDF/사진</button>
       </div>
       <div id="add-content"></div>
     </div>
@@ -1203,6 +1204,9 @@ function renderAdd() {
     } else if (el.dataset.action === 'tab-bulk') {
       setActiveTab(1);
       showBulkInput();
+    } else if (el.dataset.action === 'tab-pdf') {
+      setActiveTab(2);
+      showPdfInput();
     }
   };
 
@@ -1322,13 +1326,10 @@ function showBulkInput() {
   const content = document.getElementById('add-content');
   content.innerHTML = `
     <div class="add-help">
-      <strong>단어 — 뜻</strong> 형식으로 입력하거나 PDF를 업로드하세요.
+      <strong>단어 — 뜻</strong> 형식으로 한 줄에 하나씩 입력하세요.
     </div>
     <div class="bulk-actions">
       <div class="add-status" id="add-status"></div>
-      <label class="btn-pdf btn-pdf-disabled" id="btn-pdf" title="추후 개발 예정">
-        <span id="pdf-label-text">PDF (준비 중)</span>
-      </label>
       <button class="btn-save" data-action="save" type="button">저장</button>
     </div>
     <textarea id="bulk-input" class="bulk-input" rows="8"
@@ -1337,58 +1338,129 @@ function showBulkInput() {
   `;
 
   document.getElementById('bulk-input').addEventListener('input', updateAddStatus);
-
-  // PDF 업로드 처리
-  document.getElementById('pdf-input').addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    const status = document.getElementById('add-status');
-    const btnPdf = document.getElementById('btn-pdf');
-    status.innerHTML = '<span class="status-ok">PDF 읽는 중...</span>';
-    document.getElementById('pdf-label-text').textContent = '읽는 중...';
-
-    try {
-      const text = await extractPdfText(file);
-      document.getElementById('pdf-label-text').textContent = 'PDF';
-
-      if (!text.trim()) {
-        status.innerHTML = '<span class="status-warn">PDF에서 텍스트를 찾을 수 없어요 (스캔/손글씨 PDF는 지원 안 됨)</span>';
-        return;
-      }
-
-      const textarea = document.getElementById('bulk-input');
-      const newValue = textarea.value
-        ? textarea.value + '\n' + text
-        : text;
-      textarea.value = newValue;
-      textarea.dispatchEvent(new Event('input'));
-      textarea.scrollTop = 0;
-      textarea.focus();
-      updateAddStatus();
-
-      const parsed = parseBulkWords(text);
-      if (parsed.length > 0) {
-        status.innerHTML = `<span class="status-ok">PDF에서 ${parsed.length}개 단어 추출됨</span>`;
-      } else {
-        // 파싱은 안 되지만 텍스트는 있는 경우 → 원본 보여주기
-        status.innerHTML = `<span class="status-warn">텍스트는 추출됐지만 단어-뜻 쌍을 인식하지 못했어요. 텍스트를 직접 확인/수정해주세요.</span>`;
-      }
-    } catch (err) {
-      document.getElementById('pdf-label-text').textContent = 'PDF';
-      status.innerHTML = '<span class="status-warn">PDF 읽기 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
-    }
-  });
-
   document.getElementById('bulk-input').focus();
 }
 
-// PDF에서 텍스트 추출
-async function extractPdfText(file) {
-  if (typeof pdfjsLib === 'undefined') {
-    throw new Error('PDF 라이브러리가 로드되지 않았어요.');
+// PDF/사진 입력 모드
+function showPdfInput() {
+  const content = document.getElementById('add-content');
+  content.innerHTML = `
+    <div class="add-help">
+      PDF 또는 사진에서 단어를 자동 인식합니다.<br>
+      인식 후 결과를 확인/수정한 뒤 저장하세요.
+    </div>
+    <div class="pdf-upload-area">
+      <label class="btn-pdf-large">
+        <input type="file" id="pdf-input" accept=".pdf" hidden />
+        <span class="pdf-btn-icon">\u{1F4C4}</span>
+        <span id="pdf-label-text">PDF 업로드</span>
+      </label>
+      <label class="btn-pdf-large">
+        <input type="file" id="camera-input" accept="image/*" hidden />
+        <span class="pdf-btn-icon">\u{1F4F7}</span>
+        <span id="camera-label-text">사진</span>
+      </label>
+    </div>
+    <div class="add-status" id="add-status"></div>
+    <textarea id="bulk-input" class="bulk-input" rows="6"
+      placeholder="인식된 텍스트가 여기에 표시됩니다.&#10;직접 수정할 수도 있어요."></textarea>
+    <div id="bulk-preview" class="bulk-preview"></div>
+    <button class="btn-save btn-save-full" data-action="save" type="button"
+      style="display:none" id="pdf-save-btn">저장</button>
+  `;
+
+  const textarea = document.getElementById('bulk-input');
+  const saveBtn = document.getElementById('pdf-save-btn');
+  textarea.addEventListener('input', () => {
+    updateAddStatus();
+    saveBtn.style.display = textarea.value.trim() ? '' : 'none';
+  });
+
+  // 공통 결과 처리
+  function handleOcrResult(text, source) {
+    if (!text.trim()) {
+      document.getElementById('add-status').innerHTML =
+        '<span class="status-warn">텍스트를 인식하지 못했어요</span>';
+      return;
+    }
+    textarea.value = textarea.value ? textarea.value + '\n' + text : text;
+    textarea.dispatchEvent(new Event('input'));
+    textarea.scrollTop = 0;
+
+    const parsed = parseBulkWords(text);
+    document.getElementById('add-status').innerHTML = parsed.length > 0
+      ? `<span class="status-ok">${source}에서 ${parsed.length}개 단어 추출됨</span>`
+      : '<span class="status-warn">텍스트는 추출됐지만 단어-뜻 쌍을 인식하지 못했어요. 직접 수정해주세요.</span>';
   }
-  pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.js';
+
+  // PDF 업로드
+  document.getElementById('pdf-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('add-status').innerHTML = '<span class="status-ok">PDF 읽는 중...</span>';
+    document.getElementById('pdf-label-text').textContent = '읽는 중...';
+    try {
+      const text = await extractPdfText(file, 'eng+kor');
+      document.getElementById('pdf-label-text').textContent = 'PDF 업로드';
+      handleOcrResult(text, 'PDF');
+    } catch (err) {
+      document.getElementById('pdf-label-text').textContent = 'PDF 업로드';
+      document.getElementById('add-status').innerHTML =
+        '<span class="status-warn">PDF 읽기 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
+    }
+  });
+
+  // 사진 OCR
+  document.getElementById('camera-input').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    document.getElementById('add-status').innerHTML = '<span class="status-ok">사진 인식 중... (처음엔 느릴 수 있어요)</span>';
+    document.getElementById('camera-label-text').textContent = '인식 중...';
+    try {
+      const text = await ocrImage(file, 'eng+kor');
+      document.getElementById('camera-label-text').textContent = '사진';
+      handleOcrResult(text, '사진');
+    } catch (err) {
+      document.getElementById('camera-label-text').textContent = '사진';
+      document.getElementById('add-status').innerHTML =
+        '<span class="status-warn">사진 인식 실패: ' + escapeHtml(String(err.message || err)) + '</span>';
+    }
+  });
+}
+
+// ---- OCR / PDF 유틸리티 ----
+
+// pdf.js 동적 로드 (버튼 눌렀을 때만 CDN에서 다운로드)
+async function loadPdfJs() {
+  if (typeof pdfjsLib !== 'undefined') return;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('PDF 라이브러리 로드 실패'));
+    document.head.appendChild(script);
+  });
+}
+
+// tesseract.js 동적 로드 (버튼 눌렀을 때만 CDN에서 다운로드, ~2MB)
+async function loadTesseract() {
+  if (typeof Tesseract !== 'undefined') return;
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    script.onload = resolve;
+    script.onerror = () => reject(new Error('OCR 라이브러리 로드 실패'));
+    document.head.appendChild(script);
+  });
+}
+
+// PDF에서 텍스트 추출
+// 1단계: 텍스트 레이어가 있으면 직접 추출 (빠름)
+// 2단계: 텍스트 레이어가 없으면 (Goodnotes 등 이미지 PDF) OCR로 폴백
+async function extractPdfText(file, lang) {
+  await loadPdfJs();
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -1397,25 +1469,48 @@ async function extractPdfText(file) {
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
+    const textItems = content.items.filter(item => item.str.trim().length > 0);
 
-    // 텍스트 아이템을 Y좌표 기준으로 그룹핑 (같은 줄 판별)
-    let lastY = null;
-    let line = '';
-    content.items.forEach(item => {
-      if (item.str.trim() === '') return;
-      const y = Math.round(item.transform[5]); // Y좌표
-      if (lastY !== null && Math.abs(y - lastY) > 5) {
-        // Y좌표가 다르면 새 줄
-        fullText += line.trim() + '\n';
-        line = '';
-      }
-      line += item.str + ' ';
-      lastY = y;
-    });
-    if (line.trim()) fullText += line.trim() + '\n';
+    if (textItems.length > 3) {
+      // 텍스트 레이어 있음 → 직접 추출 (빠름)
+      let lastY = null;
+      let line = '';
+      textItems.forEach(item => {
+        const y = Math.round(item.transform[5]);
+        if (lastY !== null && Math.abs(y - lastY) > 5) {
+          fullText += line.trim() + '\n';
+          line = '';
+        }
+        line += item.str + ' ';
+        lastY = y;
+      });
+      if (line.trim()) fullText += line.trim() + '\n';
+    } else {
+      // 텍스트 레이어 없음 (이미지 PDF) → OCR 폴백
+      const status = document.getElementById('add-status');
+      if (status) status.innerHTML = `<span class="status-ok">페이지 ${i}/${pdf.numPages} OCR 인식 중...</span>`;
+
+      await loadTesseract();
+      const viewport = page.getViewport({ scale: 2.0 });
+      const canvas = document.createElement('canvas');
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext('2d');
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      const { data: { text } } = await Tesseract.recognize(canvas, lang);
+      fullText += text + '\n';
+    }
   }
 
   return fullText.trim();
+}
+
+// 이미지 파일 → OCR 텍스트 추출
+async function ocrImage(file, lang) {
+  await loadTesseract();
+  const { data: { text } } = await Tesseract.recognize(file, lang);
+  return text.trim();
 }
 
 function updateAddStatus() {

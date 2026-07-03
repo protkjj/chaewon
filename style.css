@@ -906,9 +906,44 @@ mark {
   color: var(--primary);
 }
 
-.btn-pdf-disabled {
-  opacity: 0.4;
-  pointer-events: none;
+/* PDF/사진 업로드 영역 */
+.pdf-upload-area {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.btn-pdf-large {
+  flex: 1;
+  padding: 28px 16px;
+  background: var(--card-bg);
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  color: var(--text);
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transition: all var(--transition);
+}
+
+.btn-pdf-large:active {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-light);
+}
+
+.pdf-btn-icon {
+  font-size: 32px;
+}
+
+.btn-save-full {
+  width: 100%;
+  margin-top: 12px;
 }
 
 .bulk-actions {
