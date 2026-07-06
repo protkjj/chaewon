@@ -81,6 +81,9 @@ function formatDefinitionInline(text) {
 // "단어 — 뜻" 형식의 텍스트를 카드 배열로 변환
 // 지원 구분자: " — " (em dash), " - " (hyphen), 또는 영어→한글 전환점
 function parseBulkWords(text) {
+  // 마크다운 이스케이프 제거: Gemini OCR 등에서 \~ 로 반환되는 경우 처리
+  text = text.replace(/\\~/g, '~');
+
   // 줄바꿈이 없어도 한글 끝 + 공백 + 영문 시작 지점에서 자동으로 줄을 나눔
   // 예: "사과 book — 책" → "사과\nbook — 책"
   text = text.replace(/([\uAC00-\uD7AF\u3131-\u318E)~])\s+([a-zA-Z])/g, '$1\n$2');
