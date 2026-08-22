@@ -266,11 +266,38 @@ const Storage = {
     this._saveTrash(trash.filter(c => c.id !== id));
   },
 
+  // 영구삭제 마커 (tombstone)
+  // "어떤 단어를 휴지통에서 영구히 지웠다"는 사실 자체를 기록한다.
+  // 이 기록이 없으면 클라우드나 다른 기기의 휴지통 사본이
+  // 다음 동기화 때 다시 합쳐져서 지운 단어가 부활한다.
+  PURGED_KEY: 'flashcard_purged',
+
+  getPurged() {
+    const data = localStorage.getItem(this.PURGED_KEY);
+    return data ? JSON.parse(data) : [];
+  },
+
+  _savePurged(list) {
+    localStorage.setItem(this.PURGED_KEY, JSON.stringify(list));
+  },
+
+  _addPurged(terms) {
+    const now = Date.now();
+    const purged = this.getPurged().filter(p => !terms.includes(p.term));
+    terms.forEach(term => purged.push({ term, purgedAt: now }));
+    this._savePurged(purged);
+  },
+
   permanentDelete(id) {
-    this._saveTrash(this.getTrash().filter(c => c.id !== id));
+    const trash = this.getTrash();
+    const card = trash.find(c => c.id === id);
+    if (card) this._addPurged([normalizeTerm(card.term)]);
+    this._saveTrash(trash.filter(c => c.id !== id));
   },
 
   emptyTrash() {
+    const terms = this.getTrash().map(c => normalizeTerm(c.term));
+    if (terms.length > 0) this._addPurged(terms);
     this._saveTrash([]);
   },
 
@@ -395,28 +422,37 @@ const Sync = {
     try {
       let cloudCards = [];
       let cloudTrash = [];
+      let cloudPurged = [];
 
       // 다른 기기에서 막 저장한 데이터가 있으면 업로드 전에 한 번 더 병합한다.
       if (mergeCloud) {
         const doc = await fbDb.collection('users').doc(uid).get();
         if (doc.exists) {
           const cloudData = doc.data();
-          cloudCards = this._safeParseCards(cloudData.cards);
-          cloudTrash = this._safeParseCards(cloudData.trash);
+          cloudCards = this._safeParseArray(cloudData.cards);
+          cloudTrash = this._safeParseArray(cloudData.trash);
+          cloudPurged = this._safeParseArray(cloudData.purged);
         }
       }
 
-      const cleaned = this._reconcileData(Storage.getAll(), cloudCards, Storage.getTrash(), cloudTrash);
+      const cleaned = this._reconcileData(
+        Storage.getAll(), cloudCards,
+        Storage.getTrash(), cloudTrash,
+        Storage.getPurged(), cloudPurged
+      );
       Storage._save(cleaned.cards);
       Storage._saveTrash(cleaned.trash);
+      Storage._savePurged(cleaned.purged);
 
       const cardsJson = JSON.stringify(cleaned.cards);
       const trashJson = JSON.stringify(cleaned.trash);
+      const purgedJson = JSON.stringify(cleaned.purged);
 
       // Firestore 문서 하나는 1MiB 를 넘을 수 없다.
       // 이 앱은 단어 전체를 문서 한 개에 통째로 넣기 때문에, 단어가 계속 쌓이면
       // 어느 순간 저장이 통째로 실패한다. 조용히 실패하면 원인을 알 수 없으니 미리 막고 알린다.
-      const bytes = new TextEncoder().encode(cardsJson + trashJson).length;
+      // 세 항목 모두 같은 문서에 들어가므로 합쳐서 잰다.
+      const bytes = new TextEncoder().encode(cardsJson + trashJson + purgedJson).length;
       if (bytes > SYNC_SIZE_LIMIT) {
         const kb = Math.round(bytes / 1024);
         localStorage.setItem(SYNC_ERROR_KEY,
@@ -428,7 +464,8 @@ const Sync = {
       await fbDb.collection('users').doc(uid).set({
         cards: cardsJson,
         trash: trashJson,
-        schemaVersion: 2,
+        purged: purgedJson,
+        schemaVersion: 3,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
       localStorage.removeItem(SYNC_ERROR_KEY);
@@ -495,16 +532,22 @@ const Sync = {
       }
 
       const cloudData = doc.data();
-      const cloudCards = this._safeParseCards(cloudData.cards);
-      const cloudTrash = this._safeParseCards(cloudData.trash);
+      const cloudCards = this._safeParseArray(cloudData.cards);
+      const cloudTrash = this._safeParseArray(cloudData.trash);
+      const cloudPurged = this._safeParseArray(cloudData.purged);
       const localCards = Storage.getAll();
       const localTrash = Storage.getTrash();
 
       // active 단어와 휴지통을 한 번에 병합해야 삭제된 단어가 다시 살아나지 않는다.
-      const mergedData = this._reconcileData(localCards, cloudCards, localTrash, cloudTrash);
+      const mergedData = this._reconcileData(
+        localCards, cloudCards,
+        localTrash, cloudTrash,
+        Storage.getPurged(), cloudPurged
+      );
 
       Storage._save(mergedData.cards);
       Storage._saveTrash(mergedData.trash);
+      Storage._savePurged(mergedData.purged);
       localStorage.setItem('lastSyncAt', Date.now().toString());
 
       // 정리된 결과를 다시 클라우드에 업로드
@@ -541,7 +584,7 @@ const Sync = {
     return Array.from(map.values());
   },
 
-  _safeParseCards(value) {
+  _safeParseArray(value) {
     if (Array.isArray(value)) return value;
     if (!value) return [];
     try {
@@ -552,7 +595,21 @@ const Sync = {
     }
   },
 
-  _reconcileData(localCards, cloudCards, localTrash, cloudTrash) {
+  // 영구삭제 마커 보관 기간 (30일).
+  // 마커는 모든 기기가 한 번씩 동기화되고 나면 할 일이 끝나므로,
+  // 오래된 것은 정리해서 무한히 쌓이지 않게 한다.
+  PURGE_TTL: 30 * 24 * 60 * 60 * 1000,
+
+  _reconcileData(localCards, cloudCards, localTrash, cloudTrash, localPurged, cloudPurged) {
+    // 1) 영구삭제 마커 병합: term별로 가장 최근 purgedAt만 남긴다
+    const purgedMap = new Map();
+    [...(localPurged || []), ...(cloudPurged || [])].forEach(p => {
+      if (!p || !p.term) return;
+      const term = normalizeTerm(p.term);
+      const at = Number(p.purgedAt || 0);
+      if (at > (purgedMap.get(term) || 0)) purgedMap.set(term, at);
+    });
+
     const records = new Map();
 
     const add = (card, source) => {
@@ -574,9 +631,19 @@ const Sync = {
         updatedAt: 0,
       };
 
-      existing.definition = mergeDefinitionText(existing.definition, card.definition || '');
+      // 뜻/별표는 "더 최근에 저장한 쪽"이 통째로 이긴다.
+      // 합집합/OR로만 합치면 오타 수정이 옛 뜻과 다시 합쳐지고
+      // 별표 해제가 되돌아오는 문제가 생긴다 (2026-08 수정).
+      // 타임스탬프가 같으면 어느 쪽이 최신인지 알 수 없으므로
+      // 안전하게 합집합/OR을 유지한다 (updatedAt이 없던 옛 데이터 호환).
+      if (updatedAt > existing.updatedAt) {
+        existing.definition = card.definition || '';
+        existing.favorite = !!card.favorite;
+      } else if (updatedAt === existing.updatedAt) {
+        existing.definition = mergeDefinitionText(existing.definition, card.definition || '');
+        existing.favorite = !!existing.favorite || !!card.favorite;
+      }
       existing.count = Math.max(existing.count || 1, card.count || 1);
-      existing.favorite = !!existing.favorite || !!card.favorite;
       existing.updatedAt = Math.max(existing.updatedAt || 0, updatedAt);
 
       if (isTrash) {
@@ -600,6 +667,14 @@ const Sync = {
 
     records.forEach(record => {
       const latest = Math.max(record.updatedAt || 0, record.activeUpdatedAt || 0, record.deletedAt || 0);
+
+      // 영구삭제가 이 단어에 일어난 마지막 일이면 active/휴지통 어디에도 살리지 않는다.
+      // 영구삭제 이후에 다시 추가/수정된 카드는 latest가 더 커서 살아남는다.
+      // 주의: 마커가 실제로 있을 때만 검사해야 한다. || 0 으로 비교하면
+      // 타임스탬프 없는 옛 카드(latest=0)가 마커도 없는데 지워져 버린다.
+      const purgedAt = purgedMap.get(record.term);
+      if (purgedAt && purgedAt >= latest) return;
+
       const base = {
         id: record.activeId || record.trashId || record.id || generateId(),
         term: record.term,
@@ -616,9 +691,16 @@ const Sync = {
       }
     });
 
+    // 오래된 영구삭제 마커 정리
+    const now = Date.now();
+    const purged = [];
+    purgedMap.forEach((purgedAt, term) => {
+      if (now - purgedAt < this.PURGE_TTL) purged.push({ term, purgedAt });
+    });
+
     cards.sort((a, b) => a.term.localeCompare(b.term));
     trash.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
-    return { cards, trash };
+    return { cards, trash, purged };
   },
 
   // 동기화 상태 텍스트
@@ -650,6 +732,18 @@ const originalUpdateCard = Storage.updateCard.bind(Storage);
 Storage.updateCard = function(id, data) {
   if (data.term !== undefined) data.term = normalizeTerm(data.term);
   data.updatedAt = Date.now();
+
+  // 철자를 고친 경우: 옛 철자를 휴지통에 남긴다 (삭제 시각 = 수정 시각).
+  // 이 표시가 없으면 클라우드에 남아 있는 옛 철자 카드가 별개 단어로 취급되어
+  // 다음 동기화 때 중복으로 부활한다. 휴지통 쪽 시각이 더 최신이므로
+  // _reconcileData의 "삭제가 더 최신이면 삭제 유지" 규칙이 옛 철자를 눌러준다.
+  const before = this.getAll().find(c => c.id === id);
+  if (before && data.term !== undefined && normalizeTerm(before.term) !== data.term) {
+    const trash = this.getTrash();
+    trash.unshift({ ...before, id: generateId(), deletedAt: data.updatedAt, updatedAt: data.updatedAt });
+    this._saveTrash(trash);
+  }
+
   const result = originalUpdateCard(id, data);
   Sync.requestSync();
   return result;
@@ -2618,9 +2712,13 @@ Storage.dedup();
 // 강제 1회 정리: active/trash를 함께 정리해서 중복 폭증과 삭제 부활을 막는다.
 if (!localStorage.getItem('cleanup_sync_v2')) {
   localStorage.setItem('cleanup_sync_v2', 'true');
-  const cleaned = Sync._reconcileData(Storage.getAll(), [], Storage.getTrash(), []);
+  // 영구삭제 마커도 함께 넘겨야 이 정리 과정에서 지운 단어가 되살아나지 않는다.
+  const cleaned = Sync._reconcileData(
+    Storage.getAll(), [], Storage.getTrash(), [], Storage.getPurged(), []
+  );
   Storage._save(cleaned.cards);
   Storage._saveTrash(cleaned.trash);
+  Storage._savePurged(cleaned.purged);
   // 로그인 되어있으면 정리된 데이터로 Firebase 덮어쓰기
   if (Sync.isSignedIn()) {
     Sync.syncToCloud();
