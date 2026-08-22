@@ -228,7 +228,11 @@ mark {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  height: 100dvh;
+  /* svh(small viewport height) = 주소창이 보이는 상태 기준의 "가장 작은" 화면 높이.
+     dvh 는 주소창이 접혔다 펴질 때마다 값이 실시간으로 바뀌기 때문에,
+     카드를 스와이프할 때 iOS 가 주소창을 움직이면 화면 전체가 위아래로 출렁였다.
+     svh 는 값이 변하지 않으므로 주소창이 어떻게 움직여도 레이아웃이 고정된다. */
+  height: 100svh;
 }
 
 .home-card {
@@ -326,7 +330,11 @@ mark {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  height: 100dvh;
+  /* svh(small viewport height) = 주소창이 보이는 상태 기준의 "가장 작은" 화면 높이.
+     dvh 는 주소창이 접혔다 펴질 때마다 값이 실시간으로 바뀌기 때문에,
+     카드를 스와이프할 때 iOS 가 주소창을 움직이면 화면 전체가 위아래로 출렁였다.
+     svh 는 값이 변하지 않으므로 주소창이 어떻게 움직여도 레이아웃이 고정된다. */
+  height: 100svh;
 }
 
 #app:has(.alphabet-page) .header {
@@ -492,6 +500,11 @@ mark {
   -webkit-user-select: none;
   user-select: none;
   -webkit-touch-callout: none;
+  /* 화면 밖에 있는 줄은 브라우저가 그리는 일을 건너뛴다.
+     단어가 수백 개인 목록에서 스크롤이 눈에 띄게 가벼워진다.
+     (지원하지 않는 브라우저는 이 두 줄을 무시하므로 예전과 똑같이 동작한다.) */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;   /* 안 그린 줄의 예상 높이 — 스크롤바가 튀지 않게 */
 }
 
 .word-item:active {
@@ -1081,10 +1094,19 @@ mark {
 
 .study-container {
   height: 100vh;
-  height: 100dvh;
+  /* svh(small viewport height) = 주소창이 보이는 상태 기준의 "가장 작은" 화면 높이.
+     dvh 는 주소창이 접혔다 펴질 때마다 값이 실시간으로 바뀌기 때문에,
+     카드를 스와이프할 때 iOS 가 주소창을 움직이면 화면 전체가 위아래로 출렁였다.
+     svh 는 값이 변하지 않으므로 주소창이 어떻게 움직여도 레이아웃이 고정된다. */
+  height: 100svh;
   display: flex;
   flex-direction: column;
   background: var(--bg);
+  /* 카드를 넘길 때 화면이 위아래로 흔들리던 원인 차단:
+     내용이 화면보다 조금 커져도 페이지가 스크롤되지 않게 잘라낸다. */
+  overflow: hidden;
+  /* 화면 끝에서 손가락을 당겼을 때 생기는 고무줄 튕김(바운스)도 막는다. */
+  overscroll-behavior: none;
 }
 
 .study-header {
@@ -1118,6 +1140,9 @@ mark {
 
 .study-body {
   flex: 1;
+  /* flex 항목의 기본값(min-height:auto)이면 카드가 클 때 아래 버튼들을 화면 밖으로
+     밀어내면서 페이지 높이가 들쭉날쭉해진다. 0으로 두면 남는 공간에 맞춰 줄어든다. */
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1127,9 +1152,14 @@ mark {
 
 /* 3D 카드 플립 */
 .flashcard-container {
+  /* 별표 버튼(position:absolute)이 이 상자를 기준으로 자리잡게 한다.
+     이 상자는 회전하지 않으므로 카드를 뒤집어도 별표는 그대로 우측 상단에 남는다. */
+  position: relative;
   width: 100%;
   max-width: 560px;
   aspect-ratio: 3 / 2;
+  /* 화면이 짧을 때 카드가 영역을 넘어가 레이아웃을 밀지 않도록 상한을 둔다. */
+  max-height: 100%;
   perspective: 1200px;
   cursor: pointer;
 }
@@ -1160,6 +1190,8 @@ mark {
   justify-content: center;
   padding: 32px;
   overflow-y: auto;
+  /* 뜻이 길어 카드 안에서 스크롤할 때, 끝에 닿아도 페이지가 따라 움직이지 않게 한다. */
+  overscroll-behavior: contain;
 }
 
 .flashcard-back {

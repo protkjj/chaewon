@@ -153,6 +153,9 @@ function mergeDefinitionText(a, b) {
 // count: 이 단어가 추가된 횟수 (중복 추가 시 증가)
 // ============================================================
 
+// 검색 결과를 한 번에 그리는 최대 개수
+const SEARCH_RESULT_LIMIT = 300;
+
 const Storage = {
   KEY: 'flashcard_cards',
 
@@ -167,28 +170,38 @@ const Storage = {
     const cards = this.getAll();
     let mergedCount = 0;
 
+    // 기존 단어를 먼저 Map 에 담아둔다.
+    // 예전에는 새 단어마다 cards.find(...) 로 전체를 훑으면서 normalizeTerm 을 다시 계산했다.
+    // 단어 2000개에 300개를 추가하면 60만 번 비교 → Map 을 쓰면 2300번이면 끝난다.
+    const byTerm = new Map();
+    cards.forEach(c => byTerm.set(normalizeTerm(c.term), c));
+
+    const now = Date.now();
+
     newCards.forEach(newCard => {
       // 소문자로 통일 저장
-      newCard.term = normalizeTerm(newCard.term);
+      const term = normalizeTerm(newCard.term);
+      newCard.term = term;
 
-      const existing = cards.find(
-        c => normalizeTerm(c.term) === newCard.term
-      );
+      const existing = byTerm.get(term);
 
       if (existing) {
         // 뜻 병합: 기존 뜻 + 새 뜻의 합집합
         existing.definition = mergeDefinitionText(existing.definition, newCard.definition);
         existing.count = (existing.count || 1) + 1;
+        existing.updatedAt = now;
         mergedCount++;
       } else {
         // 새 단어 추가
-        cards.push({
+        const created = {
           id: generateId(),
-          term: newCard.term,
+          term,
           definition: newCard.definition,
           count: 1,
-          updatedAt: 0,
-        });
+          updatedAt: now,
+        };
+        cards.push(created);
+        byTerm.set(term, created);
       }
     });
 
@@ -212,6 +225,9 @@ const Storage = {
     const card = cards.find(c => c.id === id);
     if (!card) return null;
     card.favorite = !card.favorite;
+    // 동기화 기준 시각. 예전에는 아래 래퍼에서 전체를 한 번 더 읽고 한 번 더 저장했는데,
+    // 단어가 많으면 그 한 번이 그대로 렉이 된다(500KB 를 두 번 읽고 두 번 쓰기).
+    card.updatedAt = Date.now();
     this._save(cards);
     return card;
   },
@@ -311,6 +327,10 @@ const Storage = {
 // 오프라인에서는 localStorage만 사용, 온라인 시 자동 동기화
 // ============================================================
 
+// Firestore 문서 1개의 한도는 1MiB. 여유를 두고 900KB 를 넘으면 업로드를 멈춘다.
+const SYNC_SIZE_LIMIT = 900 * 1024;
+const SYNC_ERROR_KEY = 'syncError';
+
 const firebaseConfig = {
   apiKey: "AIzaSyBmAkRDbNgE1VZ8Zj2vizklM4imMTbECKw",
   authDomain: "chaewon-word.firebaseapp.com",
@@ -390,16 +410,75 @@ const Sync = {
       Storage._save(cleaned.cards);
       Storage._saveTrash(cleaned.trash);
 
+      const cardsJson = JSON.stringify(cleaned.cards);
+      const trashJson = JSON.stringify(cleaned.trash);
+
+      // Firestore 문서 하나는 1MiB 를 넘을 수 없다.
+      // 이 앱은 단어 전체를 문서 한 개에 통째로 넣기 때문에, 단어가 계속 쌓이면
+      // 어느 순간 저장이 통째로 실패한다. 조용히 실패하면 원인을 알 수 없으니 미리 막고 알린다.
+      const bytes = new TextEncoder().encode(cardsJson + trashJson).length;
+      if (bytes > SYNC_SIZE_LIMIT) {
+        const kb = Math.round(bytes / 1024);
+        localStorage.setItem(SYNC_ERROR_KEY,
+          `데이터가 너무 커서 동기화를 멈췄어요 (${kb}KB / 한도 1024KB). 휴지통을 비워보세요.`);
+        console.error('동기화 중단: Firestore 문서 크기 한도 초과', bytes, 'bytes');
+        return;
+      }
+
       await fbDb.collection('users').doc(uid).set({
-        cards: JSON.stringify(cleaned.cards),
-        trash: JSON.stringify(cleaned.trash),
+        cards: cardsJson,
+        trash: trashJson,
         schemaVersion: 2,
         updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       });
+      localStorage.removeItem(SYNC_ERROR_KEY);
       localStorage.setItem('lastSyncAt', Date.now().toString());
     } catch (err) {
+      // 실패를 조용히 삼키면 "동기화된 줄 알았는데 안 된" 상태가 된다. 화면에 표시할 수 있게 남긴다.
+      localStorage.setItem(SYNC_ERROR_KEY, '동기화 실패: ' + (err && err.message ? err.message : err));
       console.error('동기화 업로드 실패:', err);
     }
+  },
+
+  // ---- 동기화 예약 (디바운스) ----
+  //
+  // 예전에는 별표 하나 누를 때마다 syncToCloud() 를 곧바로 불렀다. 그 한 번이
+  //   Firestore 문서 읽기(네트워크 왕복) → 로컬+클라우드 전체 병합 → 전체 업로드
+  // 라서, 단어가 많아질수록 눌릴 때마다 눈에 띄게 느려졌다.
+  // 게다가 연타하면 요청이 겹쳐서, 나중에 시작한 요청이 먼저 끝난 요청의 결과를
+  // 못 보고 덮어쓸 수 있었다(별표가 씹히는 원인).
+  //
+  // 그래서 변경이 멈춘 뒤에 딱 한 번만 올린다. localStorage 에는 이미 즉시 저장되므로
+  // 잠깐 늦게 올라가도 데이터가 사라지지 않는다.
+  _syncTimer: null,
+  _syncPending: false,
+  _syncRunning: false,
+
+  requestSync(delay = 2500) {
+    if (!this.isSignedIn()) return;
+    this._syncPending = true;
+    clearTimeout(this._syncTimer);
+    this._syncTimer = setTimeout(() => this._runSync(), delay);
+  },
+
+  async _runSync() {
+    // 이미 올리는 중이면 그냥 둔다. _syncPending 이 남아 있으므로 끝난 뒤 다시 예약된다.
+    if (this._syncRunning) return;
+    this._syncRunning = true;
+    this._syncPending = false;
+    try {
+      await this.syncToCloud();
+    } finally {
+      this._syncRunning = false;
+      if (this._syncPending) this.requestSync(0);
+    }
+  },
+
+  // 앱을 닫거나 백그라운드로 보낼 때, 기다리고 있던 동기화를 즉시 밀어넣는다.
+  flushSync() {
+    if (!this._syncPending) return;
+    clearTimeout(this._syncTimer);
+    this._runSync();
   },
 
   // Firestore → localStorage 다운로드 + 병합
@@ -546,6 +625,8 @@ const Sync = {
   getStatusText() {
     if (!fbAuth) return '';
     if (!this.isSignedIn()) return '로그인하면 기기 간 동기화';
+    const failed = localStorage.getItem(SYNC_ERROR_KEY);
+    if (failed) return failed;
     const lastSync = localStorage.getItem('lastSyncAt');
     if (lastSync) {
       const ago = Math.round((Date.now() - parseInt(lastSync)) / 60000);
@@ -558,20 +639,10 @@ const Sync = {
 // Storage 함수에 updatedAt 자동 추가 + 변경 시 자동 동기화
 const originalAddCards = Storage.addCards.bind(Storage);
 Storage.addCards = function(newCards) {
-  const now = Date.now();
-  const touchedTerms = new Set(newCards.map(c => normalizeTerm(c.term)));
+  // updatedAt 은 addCards 본체에서 이번에 추가/병합된 단어에만 찍는다.
+  // (모든 카드에 찍으면 다른 기기에서 삭제한 단어가 되살아날 수 있다.)
   const result = originalAddCards(newCards);
-
-  // 이번에 실제로 추가/병합된 단어만 최신으로 찍는다.
-  // 모든 기존 카드에 now를 찍으면 다른 기기에서 삭제한 단어가 되살아날 수 있다.
-  const cards = this.getAll();
-  cards.forEach(c => {
-    if (touchedTerms.has(normalizeTerm(c.term))) c.updatedAt = now;
-    else if (c.updatedAt === undefined) c.updatedAt = 0;
-  });
-  this._save(cards);
-  // 비동기 동기화 (UI 블로킹 없이)
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
@@ -580,26 +651,21 @@ Storage.updateCard = function(id, data) {
   if (data.term !== undefined) data.term = normalizeTerm(data.term);
   data.updatedAt = Date.now();
   const result = originalUpdateCard(id, data);
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
 const originalToggleFav = Storage.toggleFavorite.bind(Storage);
 Storage.toggleFavorite = function(id) {
   const result = originalToggleFav(id);
-  if (result) {
-    const cards = this.getAll();
-    const card = cards.find(c => c.id === id);
-    if (card) { card.updatedAt = Date.now(); this._save(cards); }
-  }
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
 const originalDeleteCard = Storage.deleteCard.bind(Storage);
 Storage.deleteCard = function(id) {
   const result = originalDeleteCard(id);
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
@@ -613,21 +679,21 @@ Storage.restoreCard = function(id) {
     card.updatedAt = Date.now();
     this._save(cards);
   }
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
 const originalPermanentDelete = Storage.permanentDelete.bind(Storage);
 Storage.permanentDelete = function(id) {
   const result = originalPermanentDelete(id);
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
 const originalEmptyTrash = Storage.emptyTrash.bind(Storage);
 Storage.emptyTrash = function() {
   const result = originalEmptyTrash();
-  if (Sync.isSignedIn()) Sync.syncToCloud();
+  Sync.requestSync();
   return result;
 };
 
@@ -693,7 +759,7 @@ function renderHome() {
   $app.innerHTML = `
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
-      ${hasWords ? `<p class="home-sub">${cardCount}개 단어 · v6</p>` : '<p class="home-sub">v6</p>'}
+      ${hasWords ? `<p class="home-sub">${cardCount}개 단어 · v7</p>` : '<p class="home-sub">v7</p>'}
       <div class="sync-bar">
         ${signedIn
           ? `<span class="sync-status">${escapeHtml(userName)} · ${syncStatus}</span>
@@ -834,6 +900,17 @@ function renderSearch() {
   const input = document.getElementById('search-input');
   const resultsEl = document.getElementById('search-results');
 
+  // 별표를 눌러도 목록을 다시 그리지 않는다.
+  // 다만 allCards 는 화면에 그릴 때 쓰는 사본이므로, 여기에도 같은 값을 반영해둬야
+  // 다음에 검색어를 바꿨을 때 별표가 원래대로 돌아가 보이지 않는다.
+  function toggleFavInSearch(id) {
+    const updated = Storage.toggleFavorite(id);
+    if (!updated) return;
+    const card = allCards.find(c => c.id === id);
+    if (card) card.favorite = updated.favorite;
+    updateFavButtons(id, updated.favorite);
+  }
+
   // 입력할 때마다 실시간 검색
   function doSearch() {
     const query = input.value.trim().toLowerCase();
@@ -852,8 +929,15 @@ function renderSearch() {
       return;
     }
 
-    resultsEl.innerHTML = `<p class="words-count">${matches.length}개 결과</p>`
-      + matches.map(c => `
+    // 한 글자만 쳐도 수천 개가 걸리는데, 그걸 전부 DOM 으로 만들면 화면이 멈춘다.
+    // 어차피 눈으로 훑을 수 있는 양이 아니므로 앞쪽 일부만 그리고 개수는 그대로 알려준다.
+    const shown = matches.slice(0, SEARCH_RESULT_LIMIT);
+    const countLabel = matches.length > SEARCH_RESULT_LIMIT
+      ? `${matches.length}개 결과 (${SEARCH_RESULT_LIMIT}개만 표시 - 더 입력해보세요)`
+      : `${matches.length}개 결과`;
+
+    resultsEl.innerHTML = `<p class="words-count">${countLabel}</p>`
+      + shown.map(c => `
         <div class="word-item" data-id="${c.id}">
           <button class="btn-fav ${c.favorite ? 'btn-fav-on' : ''}"
             data-action="toggle-fav" data-id="${c.id}"
@@ -868,7 +952,13 @@ function renderSearch() {
       `).join('');
   }
 
-  input.addEventListener('input', doSearch);
+  // 글자를 칠 때마다 곧바로 검색하면, 단어가 많을 때 타이핑이 밀린다.
+  // 손을 멈춘 뒤에 한 번만 검색한다.
+  let searchTimer = null;
+  input.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(doSearch, 150);
+  });
 
   let searchLastTapId = null;
   let searchLastTapTime = 0;
@@ -878,18 +968,14 @@ function renderSearch() {
     if (!el) return;
     if (el.dataset.action === 'back') Router.go('/alphabet');
     else if (el.dataset.action === 'toggle-fav') {
-      Storage.toggleFavorite(el.dataset.id);
-      allCards = Storage.getAll();
-      doSearch();
+      toggleFavInSearch(el.dataset.id);
     } else if (el.dataset.action === 'edit-word') {
       showEditModal(el.dataset.id, null);
     } else if (el.dataset.action === 'dbl-word') {
       const id = el.dataset.id;
       const now = Date.now();
       if (searchLastTapId === id && now - searchLastTapTime < 400) {
-        Storage.toggleFavorite(id);
-        allCards = Storage.getAll();
-        doSearch();
+        toggleFavInSearch(id);
         searchLastTapId = null;
         return;
       }
@@ -900,7 +986,20 @@ function renderSearch() {
 
   $app.addEventListener('click', handler);
   setCleanup(() => {
+    clearTimeout(searchTimer);
     $app.removeEventListener('click', handler);
+  });
+}
+
+// 화면에 떠 있는 그 단어의 별표 버튼만 바꾼다.
+//
+// 예전에는 별표를 누를 때마다 목록 전체를 renderWords()/doSearch() 로 다시 그렸다.
+// 단어가 수백 개면 그때마다 DOM 수천 개를 새로 만드느라 누를 때마다 버벅였다.
+// 바뀌는 건 별 하나뿐이므로 그 버튼만 손대면 된다.
+function updateFavButtons(id, favorite) {
+  document.querySelectorAll(`.btn-fav[data-id="${id}"]`).forEach(btn => {
+    btn.classList.toggle('btn-fav-on', favorite);
+    btn.textContent = favorite ? '\u2605' : '\u2606';
   });
 }
 
@@ -1028,6 +1127,18 @@ function renderWords(letter) {
     </div>
   `;
 
+  // 별표를 눌러도 목록 전체를 다시 그리지 않고 그 줄의 별만 바꾼다.
+  // 예외: 즐겨찾기(★) 목록에서 별을 끄면 그 단어는 목록에서 빠져야 하므로 다시 그린다.
+  function toggleFavInList(id) {
+    const updated = Storage.toggleFavorite(id);
+    if (!updated) return;
+    if (isFav && !updated.favorite) {
+      renderWords(letter);
+      return;
+    }
+    updateFavButtons(id, updated.favorite);
+  }
+
   // 더블탭 → 별표
   let lastTapId = null;
   let lastTapTime = 0;
@@ -1052,16 +1163,14 @@ function renderWords(letter) {
       }
       case 'toggle-fav':
         e.stopPropagation();
-        Storage.toggleFavorite(el.dataset.id);
-        renderWords(letter);
+        toggleFavInList(el.dataset.id);
         break;
       case 'dbl-word': {
         // 더블탭 → 별표 토글
         const id = el.dataset.id;
         const now = Date.now();
         if (lastTapId === id && now - lastTapTime < 400) {
-          Storage.toggleFavorite(id);
-          renderWords(letter);
+          toggleFavInList(id);
           lastTapId = null;
           return;
         }
@@ -1671,71 +1780,69 @@ function renderStudy(letter) {
   setCleanup(() => document.removeEventListener('keydown', keyHandler));
 }
 
-function renderStudyUI(slideDirection) {
-  // 스와이프 플래그 강제 리셋
-  const card = study.cards[study.index];
-  const progress = ((study.index + 1) / study.cards.length) * 100;
+// 카드 터치 판정용 상태.
+// renderStudyUI 안의 지역변수로 두면 카드를 넘길 때 초기화할 방법이 없어서 밖으로 뺐다.
+let cardLastTouch = 0;
+let isDoubleTap = false;
 
+// 학습 화면의 "골격"을 만든다. 골격은 학습을 시작할 때 한 번만 만들고,
+// 카드를 넘길 때는 updateStudyCard() 로 내용만 갈아끼운다.
+//
+// 왜 이렇게 나눴나:
+// 예전에는 카드를 넘길 때마다 화면 전체를 innerHTML 로 새로 만들었다. 그러면
+//  (1) 브라우저가 레이아웃을 처음부터 다시 계산하면서 화면이 위아래로 튀고
+//  (2) 스크롤 위치가 0으로 되돌아가 흔들리는 것처럼 보이며
+//  (3) 이벤트 리스너를 매번 새로 붙여야 해서 느려진다.
+function renderStudyUI(slideDirection) {
   $app.innerHTML = `
     <div class="study-container">
       <div class="study-header">
-        <button class="btn-back" id="btn-exit">\u00D7</button>
-        <span class="study-letter">${
-          !study.letter ? '전체 낱말카드'
-          : study.letter.toUpperCase() === 'FAV' ? '\u2605 낱말카드'
-          : study.letter + ' 낱말카드'
-        }</span>
+        <button class="btn-back" id="btn-exit">×</button>
+        <span class="study-letter" id="study-letter"></span>
         <div class="study-progress">
-          <div class="study-progress-bar" style="width: ${progress}%"></div>
+          <div class="study-progress-bar" id="study-progress-bar"></div>
         </div>
-        <span class="study-counter">
-          ${study.index + 1} / ${study.cards.length}
-        </span>
+        <span class="study-counter" id="study-counter"></span>
       </div>
       <div class="study-score">
-        <span class="score-unknown">\u2717 ${study.unknowns.size}</span>
-        <span class="score-known">\u2713 ${study.knowns.size}</span>
+        <span class="score-unknown" id="score-unknown"></span>
+        <span class="score-known" id="score-known"></span>
       </div>
       <div class="study-body" id="study-body">
-        <div class="flashcard-container ${slideDirection || ''}" id="flashcard-tap">
-          <div class="flashcard ${study.flipped ? 'flipped' : ''}" id="flashcard">
+        <div class="flashcard-container" id="flashcard-tap">
+          <div class="flashcard" id="flashcard">
             <div class="flashcard-face flashcard-front">
               <div class="flashcard-label">용어</div>
-              <div class="flashcard-text">${escapeHtml(card.term)}${card.count > 1 ? ` <span class="word-hit">\u00D7${card.count}</span>` : ''}</div>
-              <button class="btn-fav-card ${card.favorite ? 'btn-fav-on' : ''}"
-                id="btn-fav-front">${card.favorite ? '\u2605' : '\u2606'}</button>
+              <div class="flashcard-text" id="flashcard-term"></div>
               <div class="flashcard-hint">탭하여 뒤집기</div>
             </div>
             <div class="flashcard-face flashcard-back">
               <div class="flashcard-label">정의</div>
-              <div class="flashcard-text">${formatDefinitionCard(card.definition)}</div>
+              <div class="flashcard-text" id="flashcard-def"></div>
               <div class="flashcard-hint">탭하여 뒤집기</div>
             </div>
           </div>
+          <button class="btn-fav-card" id="btn-card-fav" type="button"></button>
         </div>
       </div>
       <div class="study-answer">
-        <button class="btn-answer btn-answer-no ${study.answered.has(card.id) && study.unknowns.has(card.id) ? 'btn-answer-pressed' : ''}"
-          id="btn-unknown">몰라요</button>
-        <button class="btn-answer btn-answer-yes ${study.answered.has(card.id) && study.knowns.has(card.id) ? 'btn-answer-pressed' : ''}"
-          id="btn-known">알아요</button>
+        <button class="btn-answer btn-answer-no" id="btn-unknown">몰라요</button>
+        <button class="btn-answer btn-answer-yes" id="btn-known">알아요</button>
       </div>
       <p class="study-swipe-hint">좌우로 밀어서 넘기기 · 두 번 터치하면 별표</p>
       <div class="study-nav">
-        <button class="btn-nav" id="btn-prev"
-          ${study.index === 0 ? 'disabled' : ''}>\u25C0</button>
-        <button class="btn-shuffle ${study.shuffled ? 'active' : ''}"
-          id="btn-shuffle" title="셔플">🔀</button>
-        <button class="btn-nav" id="btn-next"
-          ${study.index === study.cards.length - 1 ? 'disabled' : ''}>\u25B6</button>
+        <button class="btn-nav" id="btn-prev">◀</button>
+        <button class="btn-shuffle" id="btn-shuffle" title="셔플">🔀</button>
+        <button class="btn-nav" id="btn-next">▶</button>
       </div>
     </div>
   `;
 
-  // 카드 터치 로직: click으로 뒤집기, touchstart로 더블탭 감지
+  // ---- 아래 리스너들은 골격을 만들 때 한 번만 붙는다 ----
+  // 핸들러 안에서 study.cards[study.index] 를 그때그때 읽으므로
+  // 카드가 바뀌어도 리스너를 다시 붙일 필요가 없다.
+
   const flashcardTap = document.getElementById('flashcard-tap');
-  let cardLastTouch = 0;
-  let isDoubleTap = false;
 
   // 더블탭 감지 (touchstart 기반 - swipe와 충돌 없음)
   flashcardTap.addEventListener('touchstart', (e) => {
@@ -1745,13 +1852,7 @@ function renderStudyUI(slideDirection) {
       isDoubleTap = true;
       // 첫 탭에서 뒤집힌 걸 되돌리고 별표 토글
       flipCard();
-      const updated = Storage.toggleFavorite(study.cards[study.index].id);
-      study.cards[study.index].favorite = updated.favorite;
-      const favBtn = document.getElementById('btn-fav-front');
-      if (favBtn) {
-        favBtn.classList.toggle('btn-fav-on', updated.favorite);
-        favBtn.textContent = updated.favorite ? '\u2605' : '\u2606';
-      }
+      toggleCurrentCardFavorite();
       cardLastTouch = 0;
     } else {
       isDoubleTap = false;
@@ -1767,17 +1868,12 @@ function renderStudyUI(slideDirection) {
     flipCard();
   });
 
-  // 별표 버튼 (앞면)
-  const favBtn = document.getElementById('btn-fav-front');
-  if (favBtn) {
-    favBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const updated = Storage.toggleFavorite(study.cards[study.index].id);
-      study.cards[study.index].favorite = updated.favorite;
-      favBtn.classList.toggle('btn-fav-on', updated.favorite);
-      favBtn.textContent = updated.favorite ? '\u2605' : '\u2606';
-    });
-  }
+  // 별표 버튼 (앞/뒷면 공통 - 카드 바깥에 있어서 뒤집어도 그대로 남는다)
+  document.getElementById('btn-card-fav').addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleCurrentCardFavorite();
+  });
+
   document.getElementById('btn-exit').addEventListener('click', () =>
     Router.go(study.letter ? '/words/' + study.letter : '/alphabet')
   );
@@ -1788,17 +1884,15 @@ function renderStudyUI(slideDirection) {
   // 알아요/몰라요 버튼
   const btnKnown = document.getElementById('btn-known');
   const btnUnknown = document.getElementById('btn-unknown');
-  function lockAnswerBtns() {
-    btnKnown.disabled = true;
-    btnUnknown.disabled = true;
-  }
+
   btnKnown.addEventListener('click', () => {
     const id = study.cards[study.index].id;
     study.unknowns.delete(id);
     study.knowns.add(id);
     study.answered.add(id);
     btnKnown.classList.add('btn-answer-pressed');
-    lockAnswerBtns();
+    btnKnown.disabled = true;
+    btnUnknown.disabled = true;
     setTimeout(() => goNextOrFinish(), 200);
   });
   btnUnknown.addEventListener('click', () => {
@@ -1807,11 +1901,94 @@ function renderStudyUI(slideDirection) {
     study.unknowns.add(id);
     study.answered.add(id);
     btnUnknown.classList.add('btn-answer-pressed');
-    lockAnswerBtns();
+    btnKnown.disabled = true;
+    btnUnknown.disabled = true;
     setTimeout(() => goNextOrFinish(), 200);
   });
 
   initSwipe(document.getElementById('study-body'));
+
+  updateStudyCard(slideDirection);
+}
+
+// 현재 카드의 별표를 토글하고 화면에 반영한다.
+function toggleCurrentCardFavorite() {
+  const card = study.cards[study.index];
+  const updated = Storage.toggleFavorite(card.id);
+  if (!updated) return;
+  card.favorite = updated.favorite;
+  const favBtn = document.getElementById('btn-card-fav');
+  if (favBtn) {
+    favBtn.classList.toggle('btn-fav-on', updated.favorite);
+    favBtn.textContent = updated.favorite ? '★' : '☆';
+  }
+}
+
+// 카드 한 장 분량의 내용만 갱신한다. DOM 구조는 건드리지 않고 글자와 클래스만 바꾼다.
+function updateStudyCard(slideDirection) {
+  const card = study.cards[study.index];
+  if (!card) return;
+
+  // 헤더: 진행 막대 + 번호 + 알파벳 라벨
+  const progress = ((study.index + 1) / study.cards.length) * 100;
+  document.getElementById('study-progress-bar').style.width = progress + '%';
+  document.getElementById('study-counter').textContent =
+    `${study.index + 1} / ${study.cards.length}`;
+  document.getElementById('study-letter').textContent =
+    !study.letter ? '전체 낱말카드'
+    : study.letter.toUpperCase() === 'FAV' ? '★ 낱말카드'
+    : study.letter + ' 낱말카드';
+
+  // 점수
+  document.getElementById('score-unknown').textContent = `✗ ${study.unknowns.size}`;
+  document.getElementById('score-known').textContent = `✓ ${study.knowns.size}`;
+
+  // 뒤집힘 상태를 먼저 되돌린다.
+  // 그냥 클래스만 빼면 0.5초짜리 회전이 보이므로, transition 을 잠깐 꺼서 즉시 앞면으로.
+  const flashcard = document.getElementById('flashcard');
+  flashcard.style.transition = 'none';
+  flashcard.classList.toggle('flipped', study.flipped);
+  void flashcard.offsetWidth;   // 위 변경을 지금 즉시 반영시키는 강제 리플로우
+  flashcard.style.transition = '';
+
+  // 앞면 / 뒷면 내용
+  document.getElementById('flashcard-term').innerHTML =
+    escapeHtml(card.term)
+    + (card.count > 1 ? ` <span class="word-hit">×${card.count}</span>` : '');
+  document.getElementById('flashcard-def').innerHTML = formatDefinitionCard(card.definition);
+
+  // 별표
+  const favBtn = document.getElementById('btn-card-fav');
+  favBtn.classList.toggle('btn-fav-on', !!card.favorite);
+  favBtn.textContent = card.favorite ? '★' : '☆';
+
+  // 알아요/몰라요 버튼 상태 복구
+  const btnKnown = document.getElementById('btn-known');
+  const btnUnknown = document.getElementById('btn-unknown');
+  const answered = study.answered.has(card.id);
+  btnKnown.disabled = false;
+  btnUnknown.disabled = false;
+  btnKnown.classList.toggle('btn-answer-pressed', answered && study.knowns.has(card.id));
+  btnUnknown.classList.toggle('btn-answer-pressed', answered && study.unknowns.has(card.id));
+
+  // 하단 네비게이션
+  document.getElementById('btn-prev').disabled = study.index === 0;
+  document.getElementById('btn-next').disabled = study.index === study.cards.length - 1;
+  document.getElementById('btn-shuffle').classList.toggle('active', study.shuffled);
+
+  // 이전 카드에서의 탭이 새 카드의 더블탭으로 오인되지 않게 초기화
+  cardLastTouch = 0;
+  isDoubleTap = false;
+
+  // 넘김 애니메이션.
+  // 같은 엘리먼트에 같은 클래스를 다시 붙이는 것만으로는 애니메이션이 다시 재생되지 않는다.
+  // 그래서 클래스를 지우고 → 강제 리플로우 → 다시 붙이는 순서로 재생시킨다.
+  const container = document.getElementById('flashcard-tap');
+  container.classList.remove('slide-in-left', 'slide-in-right');
+  if (slideDirection) {
+    void container.offsetWidth;
+    container.classList.add(slideDirection);
+  }
 }
 
 function flipCard() {
@@ -1825,14 +2002,14 @@ function prevCard() {
   if (study.index <= 0) return;
   study.index--;
   study.flipped = false;
-  renderStudyUI('slide-in-left');
+  updateStudyCard('slide-in-left');
 }
 
 function nextCard() {
   if (study.index >= study.cards.length - 1) return;
   study.index++;
   study.flipped = false;
-  renderStudyUI('slide-in-right');
+  updateStudyCard('slide-in-right');
 }
 
 // 알아요/몰라요 후 다음 카드 또는 완료 화면
@@ -1840,7 +2017,7 @@ function goNextOrFinish() {
   if (study.index < study.cards.length - 1) {
     study.index++;
     study.flipped = false;
-    renderStudyUI('slide-in-right');
+    updateStudyCard('slide-in-right');
   } else {
     // 모든 카드 완료
     showStudyComplete();
@@ -1921,7 +2098,7 @@ function toggleShuffle() {
     : [...study.originalCards];
   study.index = 0;
   study.flipped = false;
-  renderStudyUI();
+  updateStudyCard();
 }
 
 function initSwipe(element) {
@@ -2458,5 +2635,12 @@ if (fbAuth) {
     }
   });
 }
+
+// 동기화는 변경 후 잠시 기다렸다 올린다(디바운스). 그 사이에 앱을 닫으면 업로드가
+// 다음 실행으로 미뤄지므로, 화면을 떠날 때 기다리던 동기화를 즉시 밀어넣는다.
+window.addEventListener('pagehide', () => Sync.flushSync());
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') Sync.flushSync();
+});
 
 Router.init();
