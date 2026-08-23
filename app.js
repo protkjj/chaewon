@@ -356,7 +356,21 @@ const Storage = {
 
 // Firestore 문서 1개의 한도는 1MiB. 여유를 두고 900KB 를 넘으면 업로드를 멈춘다.
 const SYNC_SIZE_LIMIT = 900 * 1024;
+// 멈추기 전에 미리 알려주는 기준선. 여기를 넘으면 홈 화면에 경고를 띄운다.
+const SYNC_WARN_LIMIT = 700 * 1024;
 const SYNC_ERROR_KEY = 'syncError';
+
+// 지금 저장된 데이터가 몇 바이트인지 잰다.
+// 카드 / 휴지통 / 영구삭제 마커가 모두 Firestore 문서 한 개에 함께 들어가므로 셋을 합쳐서 잰다.
+// (localStorage 는 문자열로 보관하므로 UTF-8 로 인코딩한 실제 바이트 수를 세야 정확하다.)
+function getDataBytes() {
+  const enc = new TextEncoder();
+  let bytes = 0;
+  [Storage.KEY, Storage.TRASH_KEY, Storage.PURGED_KEY].forEach(key => {
+    bytes += enc.encode(localStorage.getItem(key) || '').length;
+  });
+  return bytes;
+}
 
 const firebaseConfig = {
   apiKey: "AIzaSyBmAkRDbNgE1VZ8Zj2vizklM4imMTbECKw",
@@ -846,6 +860,14 @@ function renderHome() {
   const cardCount = Storage.getAll().length;
   const hasWords = cardCount > 0;
 
+  // 저장 용량. 이 앱은 단어 전체를 Firestore 문서 한 개에 넣기 때문에
+  // 1MB 를 넘으면 동기화가 통째로 실패한다. 그 전에 눈에 보이게 알려준다.
+  const dataBytes = getDataBytes();
+  const dataKb = Math.round(dataBytes / 1024);
+  const limitKb = Math.round(SYNC_SIZE_LIMIT / 1024);
+  const overLimit = dataBytes > SYNC_SIZE_LIMIT;
+  const nearLimit = dataBytes > SYNC_WARN_LIMIT;
+
   const syncStatus = Sync.getStatusText();
   const signedIn = Sync.isSignedIn();
   const userName = fbAuth && fbAuth.currentUser ? fbAuth.currentUser.displayName : '';
@@ -853,7 +875,17 @@ function renderHome() {
   $app.innerHTML = `
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
-      ${hasWords ? `<p class="home-sub">${cardCount}개 단어 · v7</p>` : '<p class="home-sub">v7</p>'}
+      ${hasWords
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataKb}KB · v8</p>`
+        : '<p class="home-sub">v8</p>'}
+      ${nearLimit ? `
+        <p class="home-warn ${overLimit ? 'home-warn-stop' : ''}">
+          ${overLimit
+            ? `저장 공간이 꽉 찼어요 (${dataKb}KB / ${limitKb}KB). 동기화가 멈춘 상태예요.`
+            : `저장 공간 ${dataKb}KB / ${limitKb}KB — 곧 동기화가 멈춰요.`}
+          <br>휴지통을 비우면 조금 줄어들어요.
+        </p>
+      ` : ''}
       <div class="sync-bar">
         ${signedIn
           ? `<span class="sync-status">${escapeHtml(userName)} · ${syncStatus}</span>

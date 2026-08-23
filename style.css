@@ -176,6 +176,27 @@ mark {
   margin-top: 4px;
 }
 
+/* 저장 용량이 Firestore 한도에 가까워졌을 때의 경고 */
+.home-warn {
+  margin: 10px auto 0;
+  max-width: 320px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: #fff8e1;
+  color: #8a6100;
+  border: 1px solid #ffe08a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 이미 한도를 넘어 동기화가 멈춘 상태 */
+.home-warn-stop {
+  background: var(--danger-light);
+  color: #b32020;
+  border-color: #ffc2c2;
+  font-weight: 600;
+}
+
 /* 동기화 바 */
 .sync-bar {
   margin-top: 12px;
