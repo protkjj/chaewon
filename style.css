@@ -221,6 +221,14 @@ mark {
   color: var(--text-secondary);
 }
 
+/* 백업한 지 오래됐을 때 */
+.sync-btn-warn {
+  background: #fff8e1;
+  border-color: #ffcf5a;
+  color: #8a6100;
+  font-weight: 700;
+}
+
 .sync-btn-login {
   background: var(--primary-light);
   border-color: var(--primary);
@@ -1554,6 +1562,107 @@ mark {
 .btn-modal-confirm {
   background: var(--danger);
   color: white;
+}
+
+/* ---- 백업 화면 ---- */
+
+.backup-page {
+  padding: 16px;
+  max-width: 560px;
+  margin: 0 auto;
+}
+
+.backup-summary {
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+  padding: 8px 0 18px;
+}
+
+.backup-stale {
+  color: #b37400;
+  font-weight: 700;
+}
+
+.backup-section {
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  padding: 18px 16px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow);
+}
+
+.backup-h2 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 12px;
+}
+
+/* label 로도 쓰이므로 display 를 직접 지정한다 */
+.backup-btn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--text);
+  font-family: inherit;
+}
+
+.backup-btn:active {
+  background: var(--primary-light);
+  border-color: var(--primary);
+}
+
+.backup-btn strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.backup-btn span {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.backup-btn-primary {
+  background: var(--primary-light);
+  border-color: var(--primary);
+}
+
+.backup-btn-primary strong {
+  color: var(--primary);
+}
+
+.backup-note {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-top: 10px;
+}
+
+.backup-status {
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-secondary);
+  min-height: 20px;
+  padding: 4px 0 24px;
+}
+
+.backup-status-ok {
+  color: var(--success);
+  font-weight: 700;
+}
+
+.backup-status-error {
+  color: var(--danger);
+  font-weight: 700;
 }
 
 /* ---- 8. 애니메이션 ---- */

@@ -732,6 +732,155 @@ const Sync = {
   },
 };
 
+// ============================================================
+// 2-2. 백업 (파일로 내보내기 / 파일에서 불러오기)
+//
+// 클라우드 동기화만 믿으면 안 되는 이유:
+//  - Firestore 문서 한도(1MB)에 걸리면 업로드가 통째로 멈춘다
+//  - iOS Safari 는 7일간 방문이 없으면 사이트 저장소를 지운다
+//    (홈 화면에 추가한 웹앱은 예외)
+//  - 폰을 바꾸거나 사파리 기록을 지우면 localStorage 는 사라진다
+//
+// 그래서 사용자가 직접 손에 쥘 수 있는 사본을 만들 수단이 필요하다.
+// ============================================================
+
+const Backup = {
+  LAST_KEY: 'lastBackupAt',
+  FORMAT_VERSION: 1,
+
+  // 완전 백업용. 별표/추가횟수/수정시각/휴지통까지 그대로 담는다.
+  buildJson() {
+    return JSON.stringify({
+      app: 'chaewon-flashcard',
+      formatVersion: this.FORMAT_VERSION,
+      exportedAt: Date.now(),
+      cards: Storage.getAll(),
+      trash: Storage.getTrash(),
+      purged: Storage.getPurged(),
+    });
+  },
+
+  // 사람이 읽는 형식. 앱이 없어도 내용을 알아볼 수 있고,
+  // 최악의 경우 이 텍스트를 대량입력 창에 그대로 붙여넣어도 복구된다.
+  buildText() {
+    return Storage.getAll()
+      .map(c => `${c.term} \u2014 ${c.definition}`)
+      .join('\n');
+  },
+
+  fileName(ext) {
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `단어장-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.${ext}`;
+  },
+
+  // 파일로 저장한다.
+  // iOS 는 공유 시트가 자연스럽다("파일에 저장", 카톡으로 보내기 등).
+  // 공유를 지원하지 않는 환경에서는 일반 다운로드로 떨어진다.
+  async save(text, ext, mime) {
+    const name = this.fileName(ext);
+
+    try {
+      const file = new File([text], name, { type: mime });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: name });
+        this.markDone();
+        return 'shared';
+      }
+    } catch (err) {
+      // 사용자가 공유 시트를 그냥 닫은 것은 실패가 아니다
+      if (err && err.name === 'AbortError') return 'canceled';
+      // 그 외에는 아래 다운로드 방식으로 이어서 시도한다
+    }
+
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    this.markDone();
+    return 'downloaded';
+  },
+
+  // 백업 파일을 현재 데이터에 "합친다". 덮어쓰지 않는다.
+  // 잘못 눌렀을 때 지금 데이터가 날아가면 백업 기능이 오히려 사고를 내기 때문이다.
+  restore(text, fileName) {
+    const looksJson = /\.json$/i.test(fileName || '') || text.trim().startsWith('{');
+    let cards;
+    let trash = [];
+
+    if (looksJson) {
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error('파일을 읽을 수 없어요. 백업 파일이 맞는지 확인해주세요.');
+      }
+      if (!data || !Array.isArray(data.cards)) {
+        throw new Error('단어장 백업 파일이 아니에요.');
+      }
+      cards = data.cards;
+      trash = Array.isArray(data.trash) ? data.trash : [];
+    } else {
+      cards = parseBulkWords(text).map(c => ({ ...c, count: 1, updatedAt: 0 }));
+      if (cards.length === 0) {
+        throw new Error('불러올 단어를 찾지 못했어요.');
+      }
+    }
+
+    const before = Storage.getAll().length;
+
+    // 되살리는 단어에 남아 있는 영구삭제 기록은 지운다.
+    // 그러지 않으면 병합 규칙이 "지운 단어"로 보고 도로 없애버린다.
+    const restoring = new Set(cards.map(c => normalizeTerm(c.term)));
+    Storage._savePurged(
+      Storage.getPurged().filter(p => !restoring.has(normalizeTerm(p.term)))
+    );
+
+    // 병합은 동기화와 똑같은 규칙을 쓴다(수정시각이 최신인 쪽이 이김).
+    const merged = Sync._reconcileData(
+      Storage.getAll(), cards,
+      Storage.getTrash(), trash,
+      Storage.getPurged(), []
+    );
+    Storage._save(merged.cards);
+    Storage._saveTrash(merged.trash);
+    Storage._savePurged(merged.purged);
+    Sync.requestSync();
+
+    return { before, after: merged.cards.length, added: merged.cards.length - before };
+  },
+
+  markDone() {
+    localStorage.setItem(this.LAST_KEY, Date.now().toString());
+  },
+
+  lastAt() {
+    const v = localStorage.getItem(this.LAST_KEY);
+    return v ? parseInt(v, 10) : 0;
+  },
+
+  // "3일 전" 처럼 사람이 읽는 문구
+  lastText() {
+    const at = this.lastAt();
+    if (!at) return '아직 백업한 적 없음';
+    const days = Math.floor((Date.now() - at) / 86400000);
+    if (days === 0) return '오늘 백업함';
+    if (days === 1) return '어제 백업함';
+    return `${days}일 전 백업함`;
+  },
+
+  // 백업한 지 오래되었는지 (홈 화면에서 눈에 띄게 알려줄 기준)
+  isStale() {
+    const at = this.lastAt();
+    if (!at) return Storage.getAll().length > 0;
+    return Date.now() - at > 14 * 86400000;
+  },
+};
+
 // Storage 함수에 updatedAt 자동 추가 + 변경 시 자동 동기화
 const originalAddCards = Storage.addCards.bind(Storage);
 Storage.addCards = function(newCards) {
@@ -838,6 +987,7 @@ const Router = {
     else if (hash === '/alphabet') renderAlphabet();
     else if (hash === '/search') renderSearch();
     else if (hash === '/trash') renderTrash();
+    else if (hash === '/backup') renderBackup();
     else if (hash.startsWith('/words/')) renderWords(hash.split('/')[2]);
     else if (hash === '/add') renderAdd();
     else if (hash.startsWith('/study/')) renderStudy(hash.split('/')[2]);
@@ -868,6 +1018,9 @@ function renderHome() {
   const overLimit = dataBytes > SYNC_SIZE_LIMIT;
   const nearLimit = dataBytes > SYNC_WARN_LIMIT;
 
+  // 백업한 지 오래됐으면 버튼을 눈에 띄게 바꾼다. 사람은 백업을 잊어버린다.
+  const backupStale = Backup.isStale();
+
   const syncStatus = Sync.getStatusText();
   const signedIn = Sync.isSignedIn();
   const userName = fbAuth && fbAuth.currentUser ? fbAuth.currentUser.displayName : '';
@@ -876,8 +1029,8 @@ function renderHome() {
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataKb}KB · v8</p>`
-        : '<p class="home-sub">v8</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataKb}KB · v9</p>`
+        : '<p class="home-sub">v9</p>'}
       ${nearLimit ? `
         <p class="home-warn ${overLimit ? 'home-warn-stop' : ''}">
           ${overLimit
@@ -894,6 +1047,13 @@ function renderHome() {
           : `<button class="sync-btn sync-btn-login" data-action="signin">Google 로그인으로 기기 동기화</button>`
         }
       </div>
+      ${hasWords ? `
+        <div class="sync-bar">
+          <button class="sync-btn ${backupStale ? 'sync-btn-warn' : ''}" data-action="backup">
+            ${backupStale ? '백업하기 · ' + Backup.lastText() : '백업 · ' + Backup.lastText()}
+          </button>
+        </div>
+      ` : ''}
     </header>
     <div class="home-cards">
       ${hasWords ? `
@@ -930,6 +1090,7 @@ function renderHome() {
     const el = e.target.closest('[data-action]');
     if (!el) return;
     if (el.dataset.action === 'words') Router.go('/alphabet');
+    else if (el.dataset.action === 'backup') Router.go('/backup');
     else if (el.dataset.action === 'add') Router.go('/add');
     else if (el.dataset.action === 'study') Router.go('/study');
     else if (el.dataset.action === 'signin') {
@@ -1197,6 +1358,113 @@ function renderTrash() {
           renderTrash();
         }
         break;
+    }
+  };
+
+  $app.addEventListener('click', handler);
+  setCleanup(() => $app.removeEventListener('click', handler));
+}
+
+// ---- 백업 ----
+
+function renderBackup() {
+  const cardCount = Storage.getAll().length;
+  const dataKb = Math.round(getDataBytes() / 1024);
+
+  $app.innerHTML = `
+    <header class="header">
+      <button class="btn-back" data-action="back" type="button">\u2190</button>
+      <h1>백업</h1>
+    </header>
+    <div class="backup-page">
+      <p class="backup-summary">
+        지금 <b>${cardCount}개</b> · ${dataKb}KB<br>
+        <span class="${Backup.isStale() ? 'backup-stale' : ''}">${Backup.lastText()}</span>
+      </p>
+
+      <section class="backup-section">
+        <h2 class="backup-h2">파일로 저장하기</h2>
+        <button class="backup-btn backup-btn-primary" data-action="export-json" type="button">
+          <strong>백업 파일로 저장</strong>
+          <span>별표까지 그대로 되살릴 수 있어요 (.json)</span>
+        </button>
+        <button class="backup-btn" data-action="export-text" type="button">
+          <strong>텍스트로 저장</strong>
+          <span>사람이 읽을 수 있는 형식이에요 (.txt)</span>
+        </button>
+        <p class="backup-note">
+          저장 후 <b>파일 앱</b>이나 <b>iCloud 드라이브</b>에 두면 폰이 바뀌어도 안전해요.
+        </p>
+      </section>
+
+      <section class="backup-section">
+        <h2 class="backup-h2">파일에서 불러오기</h2>
+        <label class="backup-btn">
+          <strong>백업 파일 고르기</strong>
+          <span>.json 또는 .txt</span>
+          <input type="file" id="restore-file" hidden
+            accept=".json,.txt,application/json,text/plain" />
+        </label>
+        <p class="backup-note">
+          지금 있는 단어에 <b>합쳐져요.</b> 없어지는 단어는 없으니 안심하고 눌러도 돼요.
+        </p>
+      </section>
+
+      <p id="backup-status" class="backup-status"></p>
+    </div>
+  `;
+
+  const statusEl = document.getElementById('backup-status');
+  const say = (msg, kind) => {
+    statusEl.textContent = msg;
+    statusEl.className = 'backup-status' + (kind ? ' backup-status-' + kind : '');
+  };
+
+  // 파일 선택 → 읽기 → 합치기
+  const fileInput = document.getElementById('restore-file');
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    say('읽는 중...');
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const r = Backup.restore(String(reader.result), file.name);
+        say(r.added > 0
+          ? `${r.added}개를 새로 불러왔어요 (${r.before}개 → ${r.after}개)`
+          : `이미 다 있는 단어였어요 (${r.after}개 그대로)`, 'ok');
+      } catch (err) {
+        say(err.message || '불러오지 못했어요', 'error');
+      }
+      fileInput.value = '';   // 같은 파일을 다시 고를 수 있게 초기화
+    };
+    reader.onerror = () => { say('파일을 읽지 못했어요', 'error'); fileInput.value = ''; };
+    reader.readAsText(file);
+  });
+
+  const handler = async (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el) return;
+    const action = el.dataset.action;
+
+    if (action === 'back') { Router.go('/'); return; }
+
+    const isJson = action === 'export-json';
+    if (!isJson && action !== 'export-text') return;
+
+    if (cardCount === 0) { say('저장할 단어가 없어요', 'error'); return; }
+
+    say('저장하는 중...');
+    try {
+      const result = isJson
+        ? await Backup.save(Backup.buildJson(), 'json', 'application/json')
+        : await Backup.save(Backup.buildText(), 'txt', 'text/plain');
+
+      if (result === 'canceled') say('저장을 취소했어요');
+      else if (result === 'shared') say('저장했어요', 'ok');
+      else say('다운로드 폴더에 저장했어요', 'ok');
+    } catch (err) {
+      say('저장하지 못했어요: ' + (err && err.message ? err.message : err), 'error');
     }
   };
 
