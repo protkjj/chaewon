@@ -354,10 +354,14 @@ const Storage = {
 // 오프라인에서는 localStorage만 사용, 온라인 시 자동 동기화
 // ============================================================
 
-// Firestore 문서 1개의 한도는 1MiB. 여유를 두고 900KB 를 넘으면 업로드를 멈춘다.
-const SYNC_SIZE_LIMIT = 900 * 1024;
-// 멈추기 전에 미리 알려주는 기준선. 여기를 넘으면 홈 화면에 경고를 띄운다.
-const SYNC_WARN_LIMIT = 700 * 1024;
+// Firestore 문서 1개의 한도는 1MiB.
+// 예전에는 단어 전체를 문서 하나에 넣어서 이 한도에 걸리면 동기화가 통째로 멈췄다.
+// 지금은 아래 크기를 넘지 않게 여러 문서(청크)로 나눠 담으므로 단어가 늘어나도 괜찮다.
+const CHUNK_SIZE_LIMIT = 700 * 1024;
+
+// 이제 막히는 곳은 Firestore 가 아니라 브라우저의 localStorage 다.
+// 보통 5~10MB 이므로 4MB 를 넘으면 미리 알려준다.
+const STORAGE_WARN_LIMIT = 4 * 1024 * 1024;
 const SYNC_ERROR_KEY = 'syncError';
 
 // 지금 저장된 데이터가 몇 바이트인지 잰다.
@@ -434,54 +438,24 @@ const Sync = {
     if (!uid || !fbDb) return;
 
     try {
-      let cloudCards = [];
-      let cloudTrash = [];
-      let cloudPurged = [];
-
       // 다른 기기에서 막 저장한 데이터가 있으면 업로드 전에 한 번 더 병합한다.
-      if (mergeCloud) {
-        const doc = await fbDb.collection('users').doc(uid).get();
-        if (doc.exists) {
-          const cloudData = doc.data();
-          cloudCards = this._safeParseArray(cloudData.cards);
-          cloudTrash = this._safeParseArray(cloudData.trash);
-          cloudPurged = this._safeParseArray(cloudData.purged);
-        }
-      }
+      const cloud = mergeCloud
+        ? await this._readAll(uid)
+        : { cards: [], trash: [], purged: [] };
 
       const cleaned = this._reconcileData(
-        Storage.getAll(), cloudCards,
-        Storage.getTrash(), cloudTrash,
-        Storage.getPurged(), cloudPurged
+        Storage.getAll(), cloud.cards,
+        Storage.getTrash(), cloud.trash,
+        Storage.getPurged(), cloud.purged
       );
       Storage._save(cleaned.cards);
       Storage._saveTrash(cleaned.trash);
       Storage._savePurged(cleaned.purged);
 
-      const cardsJson = JSON.stringify(cleaned.cards);
-      const trashJson = JSON.stringify(cleaned.trash);
-      const purgedJson = JSON.stringify(cleaned.purged);
+      // 크기에 맞춰 여러 문서로 나눠 저장한다.
+      // 옛 형식(문서 하나에 통째로)이었다면 이 시점에 새 형식으로 바뀐다.
+      await this._writeAll(uid, cleaned.cards, cleaned.trash, cleaned.purged);
 
-      // Firestore 문서 하나는 1MiB 를 넘을 수 없다.
-      // 이 앱은 단어 전체를 문서 한 개에 통째로 넣기 때문에, 단어가 계속 쌓이면
-      // 어느 순간 저장이 통째로 실패한다. 조용히 실패하면 원인을 알 수 없으니 미리 막고 알린다.
-      // 세 항목 모두 같은 문서에 들어가므로 합쳐서 잰다.
-      const bytes = new TextEncoder().encode(cardsJson + trashJson + purgedJson).length;
-      if (bytes > SYNC_SIZE_LIMIT) {
-        const kb = Math.round(bytes / 1024);
-        localStorage.setItem(SYNC_ERROR_KEY,
-          `데이터가 너무 커서 동기화를 멈췄어요 (${kb}KB / 한도 1024KB). 휴지통을 비워보세요.`);
-        console.error('동기화 중단: Firestore 문서 크기 한도 초과', bytes, 'bytes');
-        return;
-      }
-
-      await fbDb.collection('users').doc(uid).set({
-        cards: cardsJson,
-        trash: trashJson,
-        purged: purgedJson,
-        schemaVersion: 3,
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      });
       localStorage.removeItem(SYNC_ERROR_KEY);
       localStorage.setItem('lastSyncAt', Date.now().toString());
     } catch (err) {
@@ -538,25 +512,18 @@ const Sync = {
     if (!uid || !fbDb) return;
 
     try {
-      const doc = await fbDb.collection('users').doc(uid).get();
-      if (!doc.exists) {
+      const cloud = await this._readAll(uid);
+      if (!cloud.exists) {
         // 클라우드에 데이터 없음 → 현재 로컬 데이터 업로드
         await this.syncToCloud({ mergeCloud: false });
         return;
       }
 
-      const cloudData = doc.data();
-      const cloudCards = this._safeParseArray(cloudData.cards);
-      const cloudTrash = this._safeParseArray(cloudData.trash);
-      const cloudPurged = this._safeParseArray(cloudData.purged);
-      const localCards = Storage.getAll();
-      const localTrash = Storage.getTrash();
-
       // active 단어와 휴지통을 한 번에 병합해야 삭제된 단어가 다시 살아나지 않는다.
       const mergedData = this._reconcileData(
-        localCards, cloudCards,
-        localTrash, cloudTrash,
-        Storage.getPurged(), cloudPurged
+        Storage.getAll(), cloud.cards,
+        Storage.getTrash(), cloud.trash,
+        Storage.getPurged(), cloud.purged
       );
 
       Storage._save(mergedData.cards);
@@ -567,6 +534,7 @@ const Sync = {
       // 정리된 결과를 다시 클라우드에 업로드
       await this.syncToCloud({ mergeCloud: false });
     } catch (err) {
+      localStorage.setItem(SYNC_ERROR_KEY, '동기화 실패: ' + (err && err.message ? err.message : err));
       console.error('동기화 다운로드 실패:', err);
     }
   },
@@ -596,6 +564,119 @@ const Sync = {
     localCards.forEach(addCard);
     cloudCards.forEach(addCard);
     return Array.from(map.values());
+  },
+
+  // 배열을 "바이트 크기" 기준으로 여러 덩어리로 나눈다.
+  //
+  // 개수 기준(예: 500개씩)으로 나누지 않는 이유:
+  // 뜻이 아주 긴 단어가 한 덩어리에 몰리면 그 덩어리만 1MB 를 넘어 저장이 실패한다.
+  // 하나씩 담다가 한도에 닿으면 끊는 방식이라야 어떤 데이터가 와도 안전하다.
+  _splitIntoChunks(arr, maxBytes) {
+    const enc = new TextEncoder();
+    const chunks = [];
+    let current = [];
+    let bytes = 2;   // 빈 배열 "[]" 의 크기
+
+    arr.forEach(item => {
+      const size = enc.encode(JSON.stringify(item)).length + 1;   // +1 은 구분자 쉼표
+      // 이미 담은 게 있는데 이걸 더하면 한도를 넘는다면 여기서 끊는다.
+      // (current 가 비어 있으면 그냥 담는다. 항목 하나가 한도보다 커도 최소한 저장은 되게.)
+      if (current.length > 0 && bytes + size > maxBytes) {
+        chunks.push(current);
+        current = [];
+        bytes = 2;
+      }
+      current.push(item);
+      bytes += size;
+    });
+
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+  },
+
+  // 클라우드에서 전부 읽어온다. 구버전(문서 하나에 통째로) 형식도 그대로 읽는다.
+  async _readAll(uid) {
+    const userRef = fbDb.collection('users').doc(uid);
+    const doc = await userRef.get();
+    if (!doc.exists) {
+      return { exists: false, cards: [], trash: [], purged: [] };
+    }
+
+    const data = doc.data() || {};
+
+    // schemaVersion 3 이하 = 옛 형식. 문서 필드 안에 전부 들어 있다.
+    if (!(data.schemaVersion >= 4)) {
+      return {
+        exists: true,
+        legacy: true,
+        cards: this._safeParseArray(data.cards),
+        trash: this._safeParseArray(data.trash),
+        purged: this._safeParseArray(data.purged),
+      };
+    }
+
+    // 새 형식: 하위 컬렉션의 청크를 모아서 이어붙인다.
+    // 메타에 적힌 청크 개수를 믿지 않고 실제로 있는 문서를 전부 읽는다.
+    // 개수가 어긋나 있어도 데이터를 잃지 않기 위해서다.
+    const snap = await userRef.collection('chunks').get();
+    const buckets = { cards: [], trash: [], purged: [] };
+
+    snap.forEach(d => {
+      const m = /^(cards|trash|purged)_(\d+)$/.exec(d.id);
+      if (!m) return;
+      buckets[m[1]].push({ index: Number(m[2]), items: this._safeParseArray((d.data() || {}).data) });
+    });
+
+    const join = (name) => buckets[name]
+      .sort((a, b) => a.index - b.index)
+      .reduce((acc, part) => acc.concat(part.items), []);
+
+    return { exists: true, cards: join('cards'), trash: join('trash'), purged: join('purged') };
+  },
+
+  // 클라우드에 전부 쓴다. 하나의 배치로 처리해서 도중에 실패해도 반쪽만 남지 않게 한다.
+  async _writeAll(uid, cards, trash, purged) {
+    const userRef = fbDb.collection('users').doc(uid);
+    const chunksRef = userRef.collection('chunks');
+
+    const groups = { cards, trash, purged };
+    const counts = {};
+    const willWrite = new Map();
+
+    Object.keys(groups).forEach(name => {
+      const parts = this._splitIntoChunks(groups[name], CHUNK_SIZE_LIMIT);
+      counts[name] = parts.length;
+      parts.forEach((part, i) => willWrite.set(`${name}_${i}`, JSON.stringify(part)));
+    });
+
+    // 단어가 줄면 청크 수도 줄어든다. 남아 있는 옛 청크를 지우지 않으면
+    // 지운 단어가 다음에 읽을 때 되살아난다.
+    const existing = await chunksRef.get();
+    const toDelete = [];
+    existing.forEach(d => { if (!willWrite.has(d.id)) toDelete.push(d.id); });
+
+    // Firestore 배치는 한 번에 500개까지. 단어 5000개라도 청크는 몇 개뿐이라
+    // 실제로 넘칠 일은 없지만, 넘으면 조용히 잘리는 대신 확실히 알린다.
+    const opCount = willWrite.size + toDelete.length + 1;
+    if (opCount > 450) {
+      throw new Error(`한 번에 처리할 문서가 너무 많아요 (${opCount}개)`);
+    }
+
+    const batch = fbDb.batch();
+    willWrite.forEach((data, id) => batch.set(chunksRef.doc(id), { data }));
+    toDelete.forEach(id => batch.delete(chunksRef.doc(id)));
+
+    batch.set(userRef, {
+      schemaVersion: 4,
+      chunkCounts: counts,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      // 옛 형식의 필드는 지운다. 남겨두면 1MB 한도를 그대로 안고 가게 된다.
+      cards: firebase.firestore.FieldValue.delete(),
+      trash: firebase.firestore.FieldValue.delete(),
+      purged: firebase.firestore.FieldValue.delete(),
+    }, { merge: true });
+
+    await batch.commit();
   },
 
   _safeParseArray(value) {
@@ -1010,13 +1091,14 @@ function renderHome() {
   const cardCount = Storage.getAll().length;
   const hasWords = cardCount > 0;
 
-  // 저장 용량. 이 앱은 단어 전체를 Firestore 문서 한 개에 넣기 때문에
-  // 1MB 를 넘으면 동기화가 통째로 실패한다. 그 전에 눈에 보이게 알려준다.
+  // 저장 용량.
+  // 클라우드 쪽은 이제 여러 문서로 나눠 저장하므로 Firestore 1MB 한도에 걸리지 않는다.
+  // 남은 병목은 브라우저의 localStorage(보통 5~10MB)라서 그 기준으로 알려준다.
   const dataBytes = getDataBytes();
-  const dataKb = Math.round(dataBytes / 1024);
-  const limitKb = Math.round(SYNC_SIZE_LIMIT / 1024);
-  const overLimit = dataBytes > SYNC_SIZE_LIMIT;
-  const nearLimit = dataBytes > SYNC_WARN_LIMIT;
+  const dataText = dataBytes >= 1024 * 1024
+    ? (dataBytes / 1024 / 1024).toFixed(1) + 'MB'
+    : Math.round(dataBytes / 1024) + 'KB';
+  const nearLimit = dataBytes > STORAGE_WARN_LIMIT;
 
   // 백업한 지 오래됐으면 버튼을 눈에 띄게 바꾼다. 사람은 백업을 잊어버린다.
   const backupStale = Backup.isStale();
@@ -1029,14 +1111,12 @@ function renderHome() {
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataKb}KB · v10</p>`
-        : '<p class="home-sub">v10</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v11</p>`
+        : '<p class="home-sub">v11</p>'}
       ${nearLimit ? `
-        <p class="home-warn ${overLimit ? 'home-warn-stop' : ''}">
-          ${overLimit
-            ? `저장 공간이 꽉 찼어요 (${dataKb}KB / ${limitKb}KB). 동기화가 멈춘 상태예요.`
-            : `저장 공간 ${dataKb}KB / ${limitKb}KB — 곧 동기화가 멈춰요.`}
-          <br>휴지통을 비우면 조금 줄어들어요.
+        <p class="home-warn">
+          저장 공간이 많이 찼어요 (${dataText}).
+          <br>휴지통을 비우고, 백업 파일을 한 번 만들어두세요.
         </p>
       ` : ''}
       <div class="sync-bar">
