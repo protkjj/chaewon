@@ -86,7 +86,13 @@ function parseBulkWords(text) {
 
   // 줄바꿈이 없어도 한글 끝 + 공백 + 영문 시작 지점에서 자동으로 줄을 나눔
   // 예: "사과 book — 책" → "사과\nbook — 책"
-  text = text.replace(/([\uAC00-\uD7AF\u3131-\u318E)~])\s+([a-zA-Z])/g, '$1\n$2');
+  //
+  // 국어 단어장에서는 이 규칙을 쓰지 않는다.
+  // 단어도 뜻도 전부 한글이라 "영문이 시작되는 곳"이라는 단서 자체가 없고,
+  // 뜻에 영어가 섞여 있으면(예: "어즈버 — 아아, ah) 멀쩡한 줄이 두 동강 난다.
+  if (!Deck.isKorean) {
+    text = text.replace(/([\uAC00-\uD7AF\u3131-\u318E)~])\s+([a-zA-Z])/g, '$1\n$2');
+  }
 
   return text.split('\n')
     .map(line => line.trim())
@@ -153,11 +159,85 @@ function mergeDefinitionText(a, b) {
 // count: 이 단어가 추가된 횟수 (중복 추가 시 증가)
 // ============================================================
 
+// ============================================================
+// 1-1. 단어장 종류 (영어 / 국어)
+//
+// 한 앱에서 두 단어장을 쓴다. 데이터는 완전히 분리된다.
+// 영어 쪽 접미사가 빈 문자열인 것이 중요하다.
+// 그래야 저장 키가 예전 그대로('flashcard_cards')여서 이미 있던 단어가 그대로 남는다.
+// ============================================================
+
+const DECKS = {
+  en: {
+    label: '영어',
+    suffix: '',
+    letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''),
+  },
+  ko: {
+    label: '국어',
+    suffix: '_ko',
+    // 된소리(ㄲㄸㅃㅆㅉ)는 기본 자음에 합친다. 19칸이면 화면이 빽빽하고,
+    // 된소리로 시작하는 말은 드물어서 칸을 따로 두면 대부분 비어 보인다.
+    letters: 'ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ'.split(''),
+  },
+};
+
+const Deck = {
+  KEY: 'flashcard_deck',
+
+  get current() {
+    return localStorage.getItem(this.KEY) === 'ko' ? 'ko' : 'en';
+  },
+
+  set current(value) {
+    localStorage.setItem(this.KEY, value === 'ko' ? 'ko' : 'en');
+  },
+
+  get info() {
+    return DECKS[this.current];
+  },
+
+  get suffix() {
+    return this.info.suffix;
+  },
+
+  get isKorean() {
+    return this.current === 'ko';
+  },
+};
+
+// 한글 완성형은 0xAC00 부터 (초성 19 × 중성 21 × 종성 28) 차례로 배열돼 있다.
+// 그래서 코드값에서 0xAC00 을 빼고 588(21×28)로 나누면 몇 번째 초성인지 나온다.
+// 예: '한' → (0xD55C - 0xAC00) / 588 = 18 → 'ㅎ'
+const CHOSUNG = ['ㄱ','ㄲ','ㄴ','ㄷ','ㄸ','ㄹ','ㅁ','ㅂ','ㅃ','ㅅ','ㅆ','ㅇ','ㅈ','ㅉ','ㅊ','ㅋ','ㅌ','ㅍ','ㅎ'];
+const CHOSUNG_BASE = { 'ㄲ':'ㄱ', 'ㄸ':'ㄷ', 'ㅃ':'ㅂ', 'ㅆ':'ㅅ', 'ㅉ':'ㅈ' };
+
+// 이 단어가 어느 칸에 들어가는지 (영어면 A~Z, 국어면 ㄱ~ㅎ)
+function getInitial(term) {
+  const ch = String(term || '').charAt(0);
+  if (!ch) return '';
+
+  if (Deck.isKorean) {
+    const code = ch.charCodeAt(0);
+    if (code >= 0xAC00 && code <= 0xD7A3) {
+      const cho = CHOSUNG[Math.floor((code - 0xAC00) / 588)];
+      return CHOSUNG_BASE[cho] || cho;
+    }
+    // 'ㄱ' 처럼 자음 한 글자로 시작하는 경우도 그대로 인정한다
+    if (CHOSUNG.indexOf(ch) !== -1) return CHOSUNG_BASE[ch] || ch;
+    return ch.toUpperCase();
+  }
+
+  return ch.toUpperCase();
+}
+
 // 검색 결과를 한 번에 그리는 최대 개수
 const SEARCH_RESULT_LIMIT = 300;
 
 const Storage = {
-  KEY: 'flashcard_cards',
+  // 지금 보고 있는 단어장에 따라 저장 키가 달라진다.
+  // 영어는 접미사가 없어서 예전 키 그대로다 (기존 데이터 유지).
+  get KEY() { return 'flashcard_cards' + Deck.suffix; },
 
   // 모든 카드 가져오기
   getAll() {
@@ -248,7 +328,7 @@ const Storage = {
   },
 
   // 휴지통
-  TRASH_KEY: 'flashcard_trash',
+  get TRASH_KEY() { return 'flashcard_trash' + Deck.suffix; },
 
   getTrash() {
     const data = localStorage.getItem(this.TRASH_KEY);
@@ -270,7 +350,7 @@ const Storage = {
   // "어떤 단어를 휴지통에서 영구히 지웠다"는 사실 자체를 기록한다.
   // 이 기록이 없으면 클라우드나 다른 기기의 휴지통 사본이
   // 다음 동기화 때 다시 합쳐져서 지운 단어가 부활한다.
-  PURGED_KEY: 'flashcard_purged',
+  get PURGED_KEY() { return 'flashcard_purged' + Deck.suffix; },
 
   getPurged() {
     const data = localStorage.getItem(this.PURGED_KEY);
@@ -566,6 +646,12 @@ const Sync = {
     return Array.from(map.values());
   },
 
+  // 청크 문서 이름 앞에 붙는 단어장 표시. 영어는 빈 문자열이라 예전 이름 그대로다.
+  // (영어: cards_0 / 국어: ko_cards_0)
+  _chunkPrefix() {
+    return Deck.isKorean ? 'ko_' : '';
+  },
+
   // 배열을 "바이트 크기" 기준으로 여러 덩어리로 나눈다.
   //
   // 개수 기준(예: 500개씩)으로 나누지 않는 이유:
@@ -603,9 +689,39 @@ const Sync = {
     }
 
     const data = doc.data() || {};
+    const prefix = this._chunkPrefix();
 
-    // schemaVersion 3 이하 = 옛 형식. 문서 필드 안에 전부 들어 있다.
-    if (!(data.schemaVersion >= 4)) {
+    // 하위 컬렉션의 청크를 모아서 이어붙인다.
+    // 메타에 적힌 청크 개수를 믿지 않고 실제로 있는 문서를 전부 읽는다.
+    // 개수가 어긋나 있어도 데이터를 잃지 않기 위해서다.
+    const snap = await userRef.collection('chunks').get();
+    const buckets = { cards: [], trash: [], purged: [] };
+    const pattern = new RegExp('^' + prefix + '(cards|trash|purged)_(\\d+)$');
+
+    snap.forEach(d => {
+      // 다른 단어장의 청크는 건너뛴다 (영어는 cards_0, 국어는 ko_cards_0)
+      const m = pattern.exec(d.id);
+      if (!m) return;
+      buckets[m[1]].push({ index: Number(m[2]), items: this._safeParseArray((d.data() || {}).data) });
+    });
+
+    const join = (name) => buckets[name]
+      .sort((a, b) => a.index - b.index)
+      .reduce((acc, part) => acc.concat(part.items), []);
+
+    const chunked = { cards: join('cards'), trash: join('trash'), purged: join('purged') };
+    const hasChunks = chunked.cards.length > 0 || chunked.trash.length > 0 || chunked.purged.length > 0;
+    if (hasChunks) return { exists: true, ...chunked };
+
+    // 내 청크가 하나도 없다면 아직 옛 형식일 수 있다.
+    //
+    // schemaVersion 으로 판단하지 않는 이유:
+    // 국어 단어장을 먼저 저장하면 그 순간 문서 버전이 4로 올라간다. 그때 영어를 읽으면
+    // "버전이 4니까 청크만 보면 된다"고 판단해 0개를 읽고, 그 0개로 옛 데이터를 덮어써
+    // 영어 단어가 통째로 사라진다. 그래서 버전이 아니라 "실제로 뭐가 있는지"를 본다.
+    //
+    // 옛 형식 필드는 영어 단어장의 데이터이므로 영어일 때만 읽는다.
+    if (!Deck.isKorean && (data.cards || data.trash || data.purged)) {
       return {
         exists: true,
         legacy: true,
@@ -615,23 +731,7 @@ const Sync = {
       };
     }
 
-    // 새 형식: 하위 컬렉션의 청크를 모아서 이어붙인다.
-    // 메타에 적힌 청크 개수를 믿지 않고 실제로 있는 문서를 전부 읽는다.
-    // 개수가 어긋나 있어도 데이터를 잃지 않기 위해서다.
-    const snap = await userRef.collection('chunks').get();
-    const buckets = { cards: [], trash: [], purged: [] };
-
-    snap.forEach(d => {
-      const m = /^(cards|trash|purged)_(\d+)$/.exec(d.id);
-      if (!m) return;
-      buckets[m[1]].push({ index: Number(m[2]), items: this._safeParseArray((d.data() || {}).data) });
-    });
-
-    const join = (name) => buckets[name]
-      .sort((a, b) => a.index - b.index)
-      .reduce((acc, part) => acc.concat(part.items), []);
-
-    return { exists: true, cards: join('cards'), trash: join('trash'), purged: join('purged') };
+    return { exists: true, ...chunked };
   },
 
   // 클라우드에 전부 쓴다. 하나의 배치로 처리해서 도중에 실패해도 반쪽만 남지 않게 한다.
@@ -639,6 +739,7 @@ const Sync = {
     const userRef = fbDb.collection('users').doc(uid);
     const chunksRef = userRef.collection('chunks');
 
+    const prefix = this._chunkPrefix();
     const groups = { cards, trash, purged };
     const counts = {};
     const willWrite = new Map();
@@ -646,14 +747,20 @@ const Sync = {
     Object.keys(groups).forEach(name => {
       const parts = this._splitIntoChunks(groups[name], CHUNK_SIZE_LIMIT);
       counts[name] = parts.length;
-      parts.forEach((part, i) => willWrite.set(`${name}_${i}`, JSON.stringify(part)));
+      parts.forEach((part, i) => willWrite.set(`${prefix}${name}_${i}`, JSON.stringify(part)));
     });
 
     // 단어가 줄면 청크 수도 줄어든다. 남아 있는 옛 청크를 지우지 않으면
     // 지운 단어가 다음에 읽을 때 되살아난다.
+    //
+    // 단, 지금 저장하는 단어장의 청크만 지운다.
+    // 이 조건이 없으면 영어를 저장할 때 국어 청크(ko_cards_0)가 통째로 지워진다.
     const existing = await chunksRef.get();
+    const mine = new RegExp('^' + prefix + '(cards|trash|purged)_\\d+$');
     const toDelete = [];
-    existing.forEach(d => { if (!willWrite.has(d.id)) toDelete.push(d.id); });
+    existing.forEach(d => {
+      if (mine.test(d.id) && !willWrite.has(d.id)) toDelete.push(d.id);
+    });
 
     // Firestore 배치는 한 번에 500개까지. 단어 5000개라도 청크는 몇 개뿐이라
     // 실제로 넘칠 일은 없지만, 넘으면 조용히 잘리는 대신 확실히 알린다.
@@ -666,15 +773,22 @@ const Sync = {
     willWrite.forEach((data, id) => batch.set(chunksRef.doc(id), { data }));
     toDelete.forEach(id => batch.delete(chunksRef.doc(id)));
 
-    batch.set(userRef, {
+    const meta = {
       schemaVersion: 4,
-      chunkCounts: counts,
+      // 청크 개수도 단어장별로 따로 적는다 (한 문서를 같이 쓰므로 필드가 겹치면 안 된다)
+      [prefix + 'chunkCounts']: counts,
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-      // 옛 형식의 필드는 지운다. 남겨두면 1MB 한도를 그대로 안고 가게 된다.
-      cards: firebase.firestore.FieldValue.delete(),
-      trash: firebase.firestore.FieldValue.delete(),
-      purged: firebase.firestore.FieldValue.delete(),
-    }, { merge: true });
+    };
+
+    // 옛 형식의 cards/trash/purged 필드는 영어 단어장의 데이터다.
+    // 국어를 저장할 때 이걸 지우면 아직 옮겨지지 않은 영어 단어가 통째로 사라진다.
+    if (!Deck.isKorean) {
+      meta.cards = firebase.firestore.FieldValue.delete();
+      meta.trash = firebase.firestore.FieldValue.delete();
+      meta.purged = firebase.firestore.FieldValue.delete();
+    }
+
+    batch.set(userRef, meta, { merge: true });
 
     await batch.commit();
   },
@@ -834,6 +948,8 @@ const Backup = {
     return JSON.stringify({
       app: 'chaewon-flashcard',
       formatVersion: this.FORMAT_VERSION,
+      // 어느 단어장인지 남긴다. 영어 백업을 국어에 불러와 섞이는 사고를 막는다.
+      deck: Deck.current,
       exportedAt: Date.now(),
       cards: Storage.getAll(),
       trash: Storage.getTrash(),
@@ -852,7 +968,7 @@ const Backup = {
   fileName(ext) {
     const d = new Date();
     const pad = n => String(n).padStart(2, '0');
-    return `단어장-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.${ext}`;
+    return `단어장-${Deck.info.label}-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.${ext}`;
   },
 
   // 파일로 저장한다.
@@ -903,6 +1019,14 @@ const Backup = {
       if (!data || !Array.isArray(data.cards)) {
         throw new Error('단어장 백업 파일이 아니에요.');
       }
+
+      // 단어장 표시가 없는 파일은 예전(영어 전용) 백업이다.
+      const fileDeck = data.deck || 'en';
+      if (fileDeck !== Deck.current) {
+        const 이름 = DECKS[fileDeck] ? DECKS[fileDeck].label : fileDeck;
+        throw new Error(`이건 ${이름} 단어장 백업이에요. ${이름} 단어장으로 바꾼 뒤 불러와주세요.`);
+      }
+
       cards = data.cards;
       trash = Array.isArray(data.trash) ? data.trash : [];
     } else {
@@ -1061,7 +1185,10 @@ const Router = {
   },
 
   handle() {
-    const hash = location.hash.slice(1) || '/';
+    // 국어 단어장은 주소에 'ㄱ' 같은 한글이 들어간다.
+    // 브라우저가 %E3%84%B1 처럼 인코딩해두므로 되돌려야 글자를 비교할 수 있다.
+    let hash = location.hash.slice(1) || '/';
+    try { hash = decodeURIComponent(hash); } catch (err) { /* 잘못된 인코딩이면 그대로 둔다 */ }
     setCleanup(null);
 
     if (hash === '/') renderHome();
@@ -1110,9 +1237,15 @@ function renderHome() {
   $app.innerHTML = `
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
+      <div class="deck-tabs">
+        ${Object.keys(DECKS).map(id => `
+          <button class="deck-tab ${Deck.current === id ? 'deck-tab-active' : ''}"
+            data-action="deck" data-deck="${id}" type="button">${DECKS[id].label}</button>
+        `).join('')}
+      </div>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v11</p>`
-        : '<p class="home-sub">v11</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v12</p>`
+        : '<p class="home-sub">v12</p>'}
       ${nearLimit ? `
         <p class="home-warn">
           저장 공간이 많이 찼어요 (${dataText}).
@@ -1161,7 +1294,7 @@ function renderHome() {
           </div>
         </button>
       ` : `
-        <p class="home-empty">아직 단어가 없어요.<br>위 버튼을 눌러 단어를 추가해보세요!</p>
+        <p class="home-empty">${DECKS[Deck.current].label} 단어장이 비어 있어요.<br>위 버튼을 눌러 단어를 추가해보세요!</p>
       `}
     </div>
   `;
@@ -1169,7 +1302,15 @@ function renderHome() {
   const handler = (e) => {
     const el = e.target.closest('[data-action]');
     if (!el) return;
-    if (el.dataset.action === 'words') Router.go('/alphabet');
+    if (el.dataset.action === 'deck') {
+      const next = el.dataset.deck;
+      if (next === Deck.current) return;
+      // 지금 단어장에 올릴 게 남아 있으면 먼저 보내고 바꾼다.
+      Sync.flushSync();
+      Deck.current = next;
+      renderHome();
+    }
+    else if (el.dataset.action === 'words') Router.go('/alphabet');
     else if (el.dataset.action === 'backup') Router.go('/backup');
     else if (el.dataset.action === 'add') Router.go('/add');
     else if (el.dataset.action === 'study') Router.go('/study');
@@ -1198,10 +1339,10 @@ function renderAlphabet() {
 
   // 알파벳별 단어 수 + 즐겨찾기 수 세기
   const counts = {};
-  'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('').forEach(l => { counts[l] = 0; });
+  Deck.info.letters.forEach(l => { counts[l] = 0; });
   let favCount = 0;
   cards.forEach(c => {
-    const initial = c.term.charAt(0).toUpperCase();
+    const initial = getInitial(c.term);
     if (counts[initial] !== undefined) counts[initial]++;
     if (c.favorite) favCount++;
   });
@@ -1560,7 +1701,7 @@ function renderWords(letter) {
   const cards = isFav
     ? allCards.filter(c => c.favorite)
     : letter
-      ? allCards.filter(c => c.term.charAt(0).toUpperCase() === letter.toUpperCase())
+      ? allCards.filter(c => getInitial(c.term) === letter)
       : allCards;
   const displayLetter = isFav ? '\u2605' : (letter ? letter.toUpperCase() : '');
 
@@ -2217,7 +2358,8 @@ const study = {
 //  - 섞은 순서 (섞었을 때만. 안 섞었으면 순서를 다시 만들어낼 수 있다)
 // 이 세 가지뿐이다.
 const StudyProgress = {
-  KEY: 'flashcard_study_progress',
+  // 진행 상황도 단어장별로 따로 기억한다.
+  get KEY() { return 'flashcard_study_progress' + Deck.suffix; },
   VERSION: 1,
 
   save() {
@@ -2274,7 +2416,7 @@ function renderStudy(letter, options = {}) {
   const cards = isFav
     ? allCards.filter(c => c.favorite)
     : letter
-      ? allCards.filter(c => c.term.charAt(0).toUpperCase() === letter.toUpperCase())
+      ? allCards.filter(c => getInitial(c.term) === letter)
       : allCards;
 
   if (cards.length === 0) {
