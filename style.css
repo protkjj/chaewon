@@ -1564,6 +1564,30 @@ mark {
   color: white;
 }
 
+/* 이어서 하기 확인 화면 */
+/* 완료 화면의 "몰라요 다시 학습"(빨강)과 같은 모양이되 색만 바꾼다.
+   빨강은 경고로 읽혀서 "이어서 하기"에는 맞지 않는다. */
+.btn-resume {
+  background: var(--primary);
+}
+
+.resume-info {
+  font-size: 15px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+  margin-bottom: 24px;
+}
+
+.resume-info b {
+  color: var(--text);
+  font-size: 17px;
+}
+
+.resume-sub {
+  font-size: 13px;
+  opacity: 0.8;
+}
+
 /* ---- 백업 화면 ---- */
 
 .backup-page {

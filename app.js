@@ -1029,8 +1029,8 @@ function renderHome() {
     <header class="home-header">
       <h1 class="home-title">단어장</h1>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataKb}KB · v9</p>`
-        : '<p class="home-sub">v9</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataKb}KB · v10</p>`
+        : '<p class="home-sub">v10</p>'}
       ${nearLimit ? `
         <p class="home-warn ${overLimit ? 'home-warn-stop' : ''}">
           ${overLimit
@@ -2126,7 +2126,68 @@ const study = {
   answered: new Set(), // 직접 버튼을 누른 카드만
 };
 
-function renderStudy(letter) {
+// 학습 진행 상황 저장
+//
+// 카드를 넘기다가 다른 화면에 갔다 오면 처음부터 다시 시작되던 것을 막는다.
+//
+// 카드 목록 전체를 저장하지는 않는다. 단어가 5000개면 그것만 190KB라
+// 카드를 넘길 때마다 그걸 쓰면 도로 느려진다. 되돌리는 데 실제로 필요한 건
+//  - 지금 보고 있는 카드의 id (여기서 이어서 시작하면 된다)
+//  - 답한 기록
+//  - 섞은 순서 (섞었을 때만. 안 섞었으면 순서를 다시 만들어낼 수 있다)
+// 이 세 가지뿐이다.
+const StudyProgress = {
+  KEY: 'flashcard_study_progress',
+  VERSION: 1,
+
+  save() {
+    const cur = study.cards[study.index];
+    if (!cur) return;
+    try {
+      localStorage.setItem(this.KEY, JSON.stringify({
+        v: this.VERSION,
+        letter: study.letter,
+        currentId: cur.id,
+        shuffled: study.shuffled,
+        order: study.shuffled ? study.cards.map(c => c.id) : null,
+        knowns: [...study.knowns],
+        answered: [...study.answered],
+        savedAt: Date.now(),
+      }));
+    } catch (err) {
+      // 저장 공간이 꽉 찬 경우. 진행 기록은 부가 기능이라 조용히 넘어간다.
+      console.warn('학습 진행 저장 실패:', err);
+    }
+  },
+
+  // 같은 범위(전체 / 알파벳 / 즐겨찾기)에서 하던 것만 이어준다.
+  load(letter) {
+    try {
+      const data = JSON.parse(localStorage.getItem(this.KEY) || 'null');
+      if (!data || data.v !== this.VERSION) return null;
+      if ((data.letter || null) !== (letter || null)) return null;
+      if (!data.currentId) return null;
+      return data;
+    } catch {
+      return null;
+    }
+  },
+
+  clear() {
+    localStorage.removeItem(this.KEY);
+  },
+
+  agoText(at) {
+    const days = Math.floor((Date.now() - at) / 86400000);
+    if (days <= 0) return '오늘';
+    if (days === 1) return '어제';
+    return `${days}일 전`;
+  },
+};
+
+// 학습 시작 지점.
+// 이어서 할 게 있으면 먼저 물어보고, 없으면 바로 시작한다.
+function renderStudy(letter, options = {}) {
   const allCards = Storage.getAll();
   const isFav = letter && letter.toUpperCase() === 'FAV';
   // FAV이면 즐겨찾기, 알파벳이면 해당 글자, 없으면 전체
@@ -2141,15 +2202,89 @@ function renderStudy(letter) {
     return;
   }
 
+  // 하던 게 있으면 이어서 할지 먼저 물어본다.
+  // (options.resume = 이어서 하기를 고름, options.fresh = 처음부터를 고름)
+  const saved = options.fresh ? null : StudyProgress.load(letter);
+  if (saved && !options.resume) {
+    renderStudyResume(letter, cards, saved);
+    return;
+  }
+  if (options.fresh) StudyProgress.clear();
+
+  startStudy(letter, cards, options.resume ? saved : null);
+}
+
+// "이어서 할까요?" 확인 화면.
+// 자동으로 중간부터 시작해버리면 처음부터 하고 싶을 때 방법이 없어서 한 번 물어본다.
+function renderStudyResume(letter, cards, saved) {
+  const order = (saved.shuffled && Array.isArray(saved.order))
+    ? saved.order
+    : cards.map(c => c.id);
+  const pos = Math.max(0, order.indexOf(saved.currentId)) + 1;
+
+  const label = !letter ? '전체 낱말카드'
+    : letter.toUpperCase() === 'FAV' ? '\u2605 낱말카드'
+    : letter.toUpperCase() + ' 낱말카드';
+
+  $app.innerHTML = `
+    <div class="study-container">
+      <div class="study-complete">
+        <h2>이어서 할까요?</h2>
+        <p class="resume-info">
+          <b>${label}</b><br>
+          ${pos} / ${cards.length} 까지 했어요 · ${StudyProgress.agoText(saved.savedAt)}
+          ${saved.shuffled ? '<br><span class="resume-sub">섞은 순서도 그대로 이어져요</span>' : ''}
+        </p>
+        <button class="btn-study-again btn-resume" id="btn-resume">이어서 하기</button>
+        <div class="complete-actions">
+          <button class="btn-restart" id="btn-fresh">처음부터 하기</button>
+          <button class="btn-go-back" id="btn-resume-back">돌아가기</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('btn-resume').addEventListener('click', () =>
+    renderStudy(letter, { resume: true }));
+  document.getElementById('btn-fresh').addEventListener('click', () =>
+    renderStudy(letter, { fresh: true }));
+  document.getElementById('btn-resume-back').addEventListener('click', () =>
+    Router.go(letter ? '/words/' + letter : '/alphabet'));
+}
+
+// 실제로 학습을 시작한다. saved 가 있으면 그 지점부터 이어서 시작한다.
+function startStudy(letter, cards, saved) {
   study.letter = letter || null;
   study.originalCards = [...cards];
   study.cards = [...cards];
   study.index = 0;
   study.flipped = false;
   study.shuffled = false;
-  study.unknowns = new Set(cards.map(c => c.id));
   study.knowns = new Set();
   study.answered = new Set();
+
+  if (saved) {
+    // 섞은 순서 되살리기.
+    // 그 사이 지워진 단어는 빠지고, 새로 추가된 단어는 뒤에 붙는다.
+    if (saved.shuffled && Array.isArray(saved.order)) {
+      const byId = new Map(cards.map(c => [c.id, c]));
+      const inOrder = saved.order.map(id => byId.get(id)).filter(Boolean);
+      const orderSet = new Set(saved.order);
+      study.cards = inOrder.concat(cards.filter(c => !orderSet.has(c.id)));
+      study.shuffled = true;
+    }
+    study.knowns = new Set(saved.knowns || []);
+    study.answered = new Set(saved.answered || []);
+
+    // 보던 카드가 그 사이 지워졌을 수도 있으므로 못 찾으면 처음부터
+    const idx = study.cards.findIndex(c => c.id === saved.currentId);
+    study.index = idx >= 0 ? idx : 0;
+  }
+
+  // 아직 "알아요"를 누르지 않은 카드는 전부 몰라요 쪽에서 시작한다.
+  study.unknowns = new Set(
+    study.cards.filter(c => !study.knowns.has(c.id)).map(c => c.id)
+  );
 
   renderStudyUI();
 
@@ -2383,6 +2518,10 @@ function updateStudyCard(slideDirection) {
     void container.offsetWidth;
     container.classList.add(slideDirection);
   }
+
+  // 여기까지 왔으면 화면에 보이는 상태가 확정된 것이므로 그대로 저장해둔다.
+  // 다른 화면에 갔다 와도 이 지점부터 이어서 할 수 있다.
+  StudyProgress.save();
 }
 
 function flipCard() {
@@ -2420,6 +2559,9 @@ function goNextOrFinish() {
 
 // 학습 완료 화면
 function showStudyComplete() {
+  // 끝까지 다 봤으므로 이어할 진행은 없다.
+  StudyProgress.clear();
+
   const unknownCards = study.cards.filter(c => study.unknowns.has(c.id));
   const knownCount = study.knowns.size;
   const letterLabel = !study.letter ? '전체'
@@ -2476,7 +2618,7 @@ function showStudyComplete() {
 
   // 처음부터 다시
   document.getElementById('btn-restart').addEventListener('click', () => {
-    renderStudy(study.letter);
+    renderStudy(study.letter, { fresh: true });
   });
 
   // 돌아가기
