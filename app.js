@@ -1182,6 +1182,31 @@ Storage.emptyTrash = function() {
 // #/study/A     → A 단어만 학습
 // ============================================================
 
+// 화면 높이를 한 번 재서 고정해둔다.
+//
+// 왜 필요한가:
+// iOS 는 스크롤에 따라 주소창을 접었다 폈다 하면서 화면 높이를 바꾼다.
+// 높이를 100% 나 100vh 로 잡아두면 그때마다 레이아웃이 다시 계산돼 화면이 출렁인다.
+// 최신 브라우저는 svh 단위로 해결되지만 iOS 15.4 미만은 그 단위를 모른다.
+// 그래서 처음 한 번 잰 값을 CSS 변수로 넣어 어느 기기에서나 같은 높이를 쓰게 한다.
+//
+// 화면을 돌렸을 때만 다시 잰다. 주소창이 움직여서 생기는 값 변화는 일부러 무시한다.
+let appHeightPx = window.innerHeight;
+
+function applyAppHeight() {
+  document.documentElement.style.setProperty('--app-height', appHeightPx + 'px');
+}
+
+applyAppHeight();
+
+window.addEventListener('orientationchange', () => {
+  // 회전 직후에는 아직 옛 크기가 잡히므로 조금 기다렸다 잰다
+  setTimeout(() => {
+    appHeightPx = window.innerHeight;
+    applyAppHeight();
+  }, 300);
+});
+
 const $app = document.getElementById('app');
 let cleanupFn = null;
 
@@ -1202,6 +1227,10 @@ const Router = {
     let hash = location.hash.slice(1) || '/';
     try { hash = decodeURIComponent(hash); } catch (err) { /* 잘못된 인코딩이면 그대로 둔다 */ }
     setCleanup(null);
+
+    // 낱말카드 화면에서는 페이지가 위아래로 딸려오지 않도록 body 를 고정한다.
+    // (카드를 옆으로 밀 때 손가락의 세로 움직임이 화면을 흔드는 것을 막는다)
+    document.body.classList.toggle('study-open', hash.indexOf('/study') === 0);
 
     if (hash === '/') renderHome();
     else if (hash === '/alphabet') renderAlphabet();
@@ -1256,8 +1285,8 @@ function renderHome() {
         `).join('')}
       </div>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v14</p>`
-        : '<p class="home-sub">v14</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v15</p>`
+        : '<p class="home-sub">v15</p>'}
       ${nearLimit ? `
         <p class="home-warn">
           저장 공간이 많이 찼어요 (${dataText}).
