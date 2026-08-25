@@ -1256,8 +1256,8 @@ function renderHome() {
         `).join('')}
       </div>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v13</p>`
-        : '<p class="home-sub">v13</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v14</p>`
+        : '<p class="home-sub">v14</p>'}
       ${nearLimit ? `
         <p class="home-warn">
           저장 공간이 많이 찼어요 (${dataText}).
@@ -3382,6 +3382,57 @@ function migrateAndSeed() {
   localStorage.setItem(DATA_VERSION, 'true');
 }
 
+// 예전에 저장된 백슬래시(\~) 한 번만 정리
+//
+// 파서는 2026-08 에 고쳐서 새로 넣는 단어에는 백슬래시가 안 붙는다.
+// 하지만 그 전에 저장된 단어에는 "\~라고 생각하다" 처럼 그대로 남아 있어서
+// 화면에도 그렇게 보인다. 두 단어장 모두 훑어서 되돌린다.
+function cleanupBackslashEscapes() {
+  const FLAG = 'cleanup_backslash_v1';
+  if (localStorage.getItem(FLAG)) return;
+
+  const now = Date.now();
+  let fixed = 0;
+
+  Object.keys(DECKS).forEach(deckId => {
+    const suffix = DECKS[deckId].suffix;
+    ['flashcard_cards', 'flashcard_trash'].forEach(base => {
+      const key = base + suffix;
+      const raw = localStorage.getItem(key);
+      if (!raw) return;
+
+      let cards;
+      try {
+        cards = JSON.parse(raw);
+      } catch (err) {
+        return;   // 읽을 수 없는 데이터는 건드리지 않는다
+      }
+      if (!Array.isArray(cards)) return;
+
+      let touched = false;
+      cards.forEach(c => {
+        ['term', 'definition'].forEach(field => {
+          if (typeof c[field] === 'string' && c[field].indexOf('\\~') !== -1) {
+            c[field] = c[field].replace(/\\~/g, '~');
+            // 고친 내용이 클라우드의 옛 값에 밀리지 않도록 수정 시각을 올린다
+            c.updatedAt = now;
+            touched = true;
+            fixed++;
+          }
+        });
+      });
+
+      if (touched) localStorage.setItem(key, JSON.stringify(cards));
+    });
+  });
+
+  localStorage.setItem(FLAG, 'true');
+  if (fixed > 0) {
+    console.log(`백슬래시 정리: ${fixed}건`);
+    Sync.requestSync();
+  }
+}
+
 // Service Worker 등록 (오프라인 지원)
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('./sw.js').catch(() => {});
@@ -3389,6 +3440,7 @@ if ('serviceWorker' in navigator) {
 
 migrateAndSeed();
 Storage.dedup();
+cleanupBackslashEscapes();
 
 // 강제 1회 정리: active/trash를 함께 정리해서 중복 폭증과 삭제 부활을 막는다.
 if (!localStorage.getItem('cleanup_sync_v2')) {

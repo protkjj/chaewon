@@ -54,6 +54,19 @@ html, body {
   overflow-x: hidden;
   /* 더블탭 확대 방지 (아이폰 Safari) */
   touch-action: manipulation;
+  /* 화면 끝에서 손가락을 당겼을 때 페이지가 고무줄처럼 딸려오는 것을 막는다.
+     아이폰에서 카드를 옆으로 밀 때 손가락이 세로로 조금만 움직여도 이게 일어난다. */
+  overscroll-behavior: none;
+}
+
+/* 낱말카드 화면에서는 페이지 스크롤 자체를 잠근다.
+   높이를 화면에 맞춰놨어도 iOS 는 여전히 살짝 튕기는 여지를 남기는데,
+   body 를 뷰포트에 못박아 두면 움직일 여지가 사라진다.
+   (학습 화면은 원래 스크롤이 필요 없는 화면이라 부작용이 없다) */
+body:has(.study-container) {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
 }
 
 #app {
