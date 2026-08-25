@@ -172,6 +172,12 @@ const DECKS = {
     label: '영어',
     suffix: '',
     letters: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split(''),
+    termPlaceholder: '영어 단어',
+    searchPlaceholder: '영어 또는 한국어로 검색',
+    bulkPlaceholder: 'apple — 사과\u000Abook — 책\u000Aaccommodate — 수용하다, 숙박시키다',
+    // 단어 칸에 한글이 들어오면 잘못 넣은 것이므로 알려준다
+    warnKoreanTerm: true,
+    ocrPrompt: '이 이미지에서 영어 단어와 한국어 뜻을 추출해서 "영어단어 — 한국어뜻" 형식으로 한 줄에 하나씩 출력해주세요. 다른 설명 없이 단어-뜻 쌍만 출력하세요.',
   },
   ko: {
     label: '국어',
@@ -179,6 +185,12 @@ const DECKS = {
     // 된소리(ㄲㄸㅃㅆㅉ)는 기본 자음에 합친다. 19칸이면 화면이 빽빽하고,
     // 된소리로 시작하는 말은 드물어서 칸을 따로 두면 대부분 비어 보인다.
     letters: 'ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ'.split(''),
+    termPlaceholder: '단어 (예: 어즈버)',
+    searchPlaceholder: '단어 또는 뜻으로 검색',
+    bulkPlaceholder: '어즈버 — 아아, 슬프다\u000A가로되 — 말하기를\u000A뫼시다 — 모시다',
+    // 국어 단어장은 단어도 한글이므로 한글 경고를 켜면 아무것도 못 넣는다
+    warnKoreanTerm: false,
+    ocrPrompt: '이 이미지에서 단어(고전 어휘 포함)와 그 뜻을 추출해서 "단어 — 뜻" 형식으로 한 줄에 하나씩 출력해주세요. 다른 설명 없이 단어-뜻 쌍만 출력하세요.',
   },
 };
 
@@ -1244,8 +1256,8 @@ function renderHome() {
         `).join('')}
       </div>
       ${hasWords
-        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v12</p>`
-        : '<p class="home-sub">v12</p>'}
+        ? `<p class="home-sub">${cardCount}개 단어 · ${dataText} · v13</p>`
+        : '<p class="home-sub">v13</p>'}
       ${nearLimit ? `
         <p class="home-warn">
           저장 공간이 많이 찼어요 (${dataText}).
@@ -1398,7 +1410,7 @@ function renderSearch() {
     <header class="header">
       <button class="btn-back" data-action="back" type="button">\u2190</button>
       <input type="text" id="search-input" class="search-input"
-        placeholder="영어 또는 한국어로 검색" autofocus />
+        placeholder="${escapeAttr(Deck.info.searchPlaceholder)}" autofocus />
     </header>
     <div class="search-page">
       <div id="search-results" class="word-list"></div>
@@ -1965,7 +1977,7 @@ function showSingleInput() {
     <div class="single-input">
       <div class="single-row" id="term-row">
         <input type="text" id="single-term" class="single-field"
-          placeholder="영어 단어" autocomplete="off" />
+          placeholder="${escapeAttr(Deck.info.termPlaceholder)}" autocomplete="off" />
         <button type="button" class="single-btn" id="btn-next-step">다음</button>
       </div>
       <p class="input-warn" id="term-warn"></p>
@@ -1989,11 +2001,16 @@ function showSingleInput() {
   // 한글 감지 패턴
   const hasKorean = (text) => /[\uAC00-\uD7AF\u3131-\u318E]/.test(text);
 
+  // 영어 단어장에서만 "단어 칸에 한글" 을 잘못된 입력으로 본다.
+  // 국어 단어장은 단어 자체가 한글이라 이 검사를 켜두면 아무것도 넣을 수 없다.
+  const 한글경고 = Deck.info.warnKoreanTerm;
+  const 잘못된단어 = (text) => 한글경고 && hasKorean(text);
+
   termInput.focus();
 
   // 영어 입력칸에 한글이 들어가면 경고
   termInput.addEventListener('input', () => {
-    if (hasKorean(termInput.value)) {
+    if (잘못된단어(termInput.value)) {
       termInput.classList.add('input-error');
       termWarn.textContent = '영어 단어를 입력하세요 (한글이 감지됨)';
     } else {
@@ -2006,7 +2023,7 @@ function showSingleInput() {
   function goToDefInput() {
     const val = termInput.value.trim();
     if (!val) return;
-    if (hasKorean(val)) {
+    if (잘못된단어(val)) {
       termInput.classList.add('input-error');
       termWarn.textContent = '영어 단어를 입력하세요 (한글이 감지됨)';
       return;
@@ -2071,7 +2088,7 @@ function showBulkInput() {
       <button class="btn-save" data-action="save" type="button">저장</button>
     </div>
     <textarea id="bulk-input" class="bulk-input" rows="8"
-      placeholder="apple — 사과&#10;book — 책&#10;accommodate — 수용하다, 숙박시키다"></textarea>
+      placeholder="${escapeAttr(Deck.info.bulkPlaceholder)}"></textarea>
     <div id="bulk-preview" class="bulk-preview"></div>
   `;
 
@@ -2186,7 +2203,7 @@ const GEMINI_API_KEY = 'AQ.Ab8RN6KdQqwn-0cA5KfCMCUFbMZR3LVG5npmRUzuCTRErwr_JA';
 async function callGeminiOcr(base64Data, mimeType, lang) {
   const prompt = lang === 'jp'
     ? '이 이미지에서 일본어 단어와 한국어 뜻을 추출해서 "일본어 — 한국어뜻" 형식으로 한 줄에 하나씩 출력해주세요. 다른 설명 없이 단어-뜻 쌍만 출력하세요.'
-    : '이 이미지에서 영어 단어와 한국어 뜻을 추출해서 "영어단어 — 한국어뜻" 형식으로 한 줄에 하나씩 출력해주세요. 다른 설명 없이 단어-뜻 쌍만 출력하세요.';
+    : Deck.info.ocrPrompt;
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
